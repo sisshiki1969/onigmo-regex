@@ -7,3 +7,6 @@ edition = "2024"
 
 [build-dependencies]
 bindgen = "0.71.0"
+cc = "1.2.22"
+pkg-config = "0.3.32"
+

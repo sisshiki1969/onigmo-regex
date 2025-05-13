@@ -5,40 +5,27 @@
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
 #[derive(Debug)]
-struct OnigmoError {
+pub struct OnigmoError {
     kind: OnigmoErrKind,
     message: String,
     span: Option<(usize, usize)>,
 }
 
 #[derive(Debug)]
-enum OnigmoErrKind {
+pub enum OnigmoErrKind {
     InvalidPattern,
     SearchError,
+    InvalidErrorMessage,
 }
 
-struct OnigmoRegex {
+pub struct OnigmoRegex {
     raw: *mut re_pattern_buffer,
     pattern: String,
     error_info: OnigErrorInfo,
 }
 
-impl std::ops::Deref for OnigmoRegex {
-    type Target = re_pattern_buffer;
-
-    fn deref(&self) -> &Self::Target {
-        unsafe { &*self.raw }
-    }
-}
-
-impl std::ops::DerefMut for OnigmoRegex {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { &mut *self.raw }
-    }
-}
-
 impl OnigmoRegex {
-    fn new(pattern: String) -> Result<Self, OnigmoError> {
+    pub fn new(pattern: String) -> Result<Self, OnigmoError> {
         let mut raw = std::ptr::null_mut();
         let pattern_start: *const u8 = pattern.as_ptr();
         let pattern_end = unsafe { pattern_start.add(pattern.len()) };
@@ -83,18 +70,22 @@ impl OnigmoRegex {
         })
     }
 
-    fn captures(&mut self, s: &str) -> Result<Option<Vec<(usize, usize)>>, OnigmoError> {
-        let str_start = s.as_ptr();
-        let str_end = unsafe { str_start.add(s.len()) };
-        let range_start = str_start;
-        let range_end = str_end;
+    pub fn as_str(&self) -> &str {
+        &self.pattern
+    }
+
+    fn captures(&mut self, heystack: &str) -> Result<Option<Vec<(usize, usize)>>, OnigmoError> {
+        let hey_start = heystack.as_ptr();
+        let hey_end = unsafe { hey_start.add(heystack.len()) };
+        let range_start = hey_start;
+        let range_end = hey_end;
         let region = unsafe { onig_region_new() };
 
         let r = unsafe {
             onig_search(
                 self.raw,
-                str_start,
-                str_end,
+                hey_start,
+                hey_end,
                 range_start,
                 range_end,
                 region,
@@ -107,22 +98,28 @@ impl OnigmoRegex {
             let num = region.num_regs as usize;
             let beg: *const usize = region.beg as _;
             let end: *const usize = region.end as _;
-            let mut v = Vec::with_capacity(num);
-            for i in 0..num {
-                let b = unsafe { *beg.add(i) };
-                let e = unsafe { *end.add(i) };
-                v.push((b, e));
-            }
+            let v = (0..num)
+                .map(|i| unsafe { (*beg.add(i), *end.add(i)) })
+                .collect();
             Ok(Some(v))
         } else if r == ONIG_MISMATCH as _ {
             Ok(None)
         } else {
             let mut s = [0; ONIG_MAX_ERROR_MESSAGE_LEN as usize];
             let err_len = unsafe { onig_error_code_to_str(s.as_mut_ptr(), r as _) } as usize;
-            let err = std::str::from_utf8(&s[..err_len]).unwrap();
+            let message = match std::str::from_utf8(&s[..err_len]) {
+                Ok(err) => err.to_string(),
+                Err(err) => {
+                    return Err(OnigmoError {
+                        kind: OnigmoErrKind::InvalidErrorMessage,
+                        message: format!("Error message is invalid UTF-8: {err}"),
+                        span: None,
+                    });
+                }
+            };
             Err(OnigmoError {
                 kind: OnigmoErrKind::SearchError,
-                message: err.to_string(),
+                message,
                 span: None,
             })
         }
@@ -133,9 +130,16 @@ impl OnigmoRegex {
 fn test() {
     let _ = unsafe { onig_init() };
     let mut onig = OnigmoRegex::new("(?<first>.)a(?<second>.)".to_string()).unwrap();
-    dbg!(
+    assert_eq!(
+        vec![(4, 7), (4, 5), (6, 7)],
         onig.captures("some accounts always taken into account")
             .unwrap()
+            .unwrap()
     );
-    dbg!(onig.captures("aaaabhddkwaaanuiuaabiubiuca").unwrap());
+    assert_eq!(
+        vec![(0, 3), (0, 1), (2, 3)],
+        onig.captures("aaaabhddkwaaanuiuaabiubiuca")
+            .unwrap()
+            .unwrap()
+    );
 }
