@@ -2,6 +2,23 @@ use std::env;
 use std::path::{Path, PathBuf};
 
 fn main() {
+    // `git submodule init update --init --recursive` is needed to
+    // fetch the oniguruma submodule.
+    // This is needed because the onigmo submodule is not
+    // fetched by default when cloning the repository.
+    if !Path::new("onigmo/onigmo.h").exists() {
+        let status = std::process::Command::new("git")
+            .args(&["submodule", "update", "--init", "--recursive"])
+            .status()
+            .expect("Failed to run git submodule update");
+
+        if !status.success() {
+            panic!("Failed to update git submodules");
+        }
+    }
+
+    println!("cargo:rerun-if-changed=.gitmodules");
+
     // Tell cargo to tell rustc to link the system onigmo
     // static library.
     println!("cargo:rustc-link-lib=static=onigmo");
