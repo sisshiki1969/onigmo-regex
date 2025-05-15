@@ -9,7 +9,7 @@ Finding matches and capturing parts of the match:
 ```rust
 use onigmo_regex::*;
 
-let mut re = OnigmoRegex::new(r"(\d{4})-(\d{2})-(\d{2})".to_string()).unwrap();
+let mut re = Regex::new(r"(\d{4})-(\d{2})-(\d{2})").unwrap();
 let text = "The date was 2018-04-07";
 let captures = re.captures(text).unwrap().unwrap();
 
@@ -21,7 +21,7 @@ assert_eq!(captures.get(0).unwrap().as_str(), "2018-04-07");
 
 ```rust
 use onigmo_regex::*;
-let re = OnigmoRegex::new(r"(?m:^)(\d+)".to_string()).unwrap();
+let re = Regex::new(r"(?m:^)(\d+)").unwrap();
 let text = "1 test 123\n2 foo";
 let captures = re.captures_from_pos(text, 7).unwrap().unwrap();
 let group = captures.get(1).unwrap();

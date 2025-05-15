@@ -24,12 +24,43 @@ impl std::fmt::Display for OnigmoError {
     }
 }
 
+impl OnigmoError {
+    pub fn custom(message: &str) -> Self {
+        Self {
+            kind: OnigmoErrKind::Custom,
+            message: message.to_string(),
+            span: None,
+        }
+    }
+
+    pub fn from_code(code: isize) -> Self {
+        let mut s = [0; ONIG_MAX_ERROR_MESSAGE_LEN as usize];
+        let err_len = unsafe { onig_error_code_to_str(s.as_mut_ptr(), code as _) } as usize;
+        let message = match std::str::from_utf8(&s[..err_len]) {
+            Ok(err) => err.to_string(),
+            Err(err) => {
+                return OnigmoError {
+                    kind: OnigmoErrKind::InvalidErrorMessage,
+                    message: format!("Error message is invalid UTF-8: {err}"),
+                    span: None,
+                };
+            }
+        };
+        Self {
+            kind: OnigmoErrKind::Custom,
+            message,
+            span: None,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum OnigmoErrKind {
     InvalidPattern = -1,
     SearchError = -2,
     InvalidErrorMessage = -3,
     CallbackError = -4,
+    Custom = -5,
 }
 
 /// Represents a single match of a regex in a haystack.
@@ -107,24 +138,37 @@ impl<'h> Match<'h> {
 /// its capture group index or name (if it has one).
 ///
 /// `'h` is the lifetime of the matched text.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Captures<'h> {
     heystack: &'h str,
     len: usize,
-    region: *mut OnigRegion,
+    region: Region,
+    offset: usize,
 }
 
 impl<'h> Captures<'h> {
+    /// Returns the start and end positions of the Nth capture group. Returns
+    /// `None` if i is not a valid capture group or if the capture group did
+    /// not match anything. The positions returned are always byte indices with
+    /// respect to the original string matched.
+    pub fn pos(&self, pos: usize) -> Option<(usize, usize)> {
+        self.region.pos(pos)
+    }
+
+    /// Returns the matched string for the capture group `i`. If `i` isn't
+    /// a valid capture group or didn't match anything, then `None` is returned.
+    pub fn at(&self, pos: usize) -> Option<&'h str> {
+        self.pos(pos).map(|(beg, end)| &self.heystack[beg..end])
+    }
+
     /// Returns the `Match` associated with the capture group at index `i`. If
     /// `i` does not correspond to a capture group, or if the capture group did
     /// not participate in the match, then `None` is returned.
     ///
     /// When `i == 0`, this is guaranteed to return a non-`None` value.
     pub fn get(&'h self, i: usize) -> Option<Match<'h>> {
-        let region = unsafe { &*self.region };
-        let beg: *const usize = region.beg as _;
-        let end: *const usize = region.end as _;
-        let (start, end) = unsafe { (*beg.add(i), *end.add(i)) };
+        let start = self.region.beg(i);
+        let end = self.region.end(i);
         if i < self.len {
             Some(Match {
                 heystack: self.heystack,
@@ -156,23 +200,188 @@ impl<'h> Captures<'h> {
     ///
     /// The elements yielded have type `Option<Match<'h>>`, where a non-`None`
     /// value is present if the capture group matches.
-    pub fn iter(&'h self) -> CapturesIter<'h> {
-        CapturesIter { cap: self, i: 0 }
+    pub fn iter(&'h self) -> SubCaptures<'h> {
+        SubCaptures { caps: self, i: 0 }
     }
 }
 
-pub struct CapturesIter<'h> {
-    cap: &'h Captures<'h>,
+/// An iterator that yields all non-overlapping capture groups matching a
+/// particular regular expression.
+///
+/// The iterator stops when no more matches can be found.
+///
+/// `'r` is the lifetime of the `Regex` struct and `'h` is the lifetime
+/// of the matched string.
+pub struct FindCaptures<'r, 'h> {
+    regex: &'r Regex,
+    heystack: &'h str,
+    last_end: usize,
+    last_match_end: Option<usize>,
+}
+
+impl<'r, 'h> Iterator for FindCaptures<'r, 'h> {
+    type Item = Result<Captures<'h>, OnigmoError>;
+
+    fn next(&mut self) -> Option<Result<Captures<'h>, OnigmoError>> {
+        if self.last_end > self.heystack.len() {
+            return None;
+        }
+
+        let mut region = Region::new();
+        let r = match self.regex.search(
+            self.heystack,
+            self.last_end,
+            self.heystack.len(),
+            Some(&mut region),
+        ) {
+            Ok(pos) => pos?,
+            Err(err) => return Some(Err(err)),
+        };
+        let (s, e) = region.pos(0).unwrap();
+
+        // Don't accept empty matches immediately following the last match.
+        // i.e., no infinite loops please.
+        if e == s && self.last_match_end.map_or(false, |l| l == e) {
+            self.last_end += self.heystack[self.last_end..]
+                .chars()
+                .next()
+                .map(|c| c.len_utf8())
+                .unwrap_or(1);
+            return self.next();
+        } else {
+            self.last_end = e;
+            self.last_match_end = Some(e);
+        }
+        Some(Ok(Captures {
+            heystack: self.heystack,
+            len: region.len(),
+            region,
+            offset: r,
+        }))
+    }
+}
+
+impl<'r, 'h> std::iter::FusedIterator for FindCaptures<'r, 'h> {}
+
+/// An iterator over all non-overlapping matches for a particular string.
+///
+/// The iterator yields a tuple of integers corresponding to the start and end
+/// of the match. The indices are byte offsets. The iterator stops when no more
+/// matches can be found.
+///
+/// `'r` is the lifetime of the `Regex` struct and `'h` is the lifetime
+/// of the matched string.
+pub struct FindMatches<'r, 'h> {
+    regex: &'r Regex,
+    region: Region,
+    heystack: &'h str,
+    last_end: usize,
+    last_match_end: Option<usize>,
+}
+
+impl<'r, 'h> Iterator for FindMatches<'r, 'h> {
+    type Item = Result<(usize, usize), OnigmoError>;
+
+    fn next(&mut self) -> Option<Result<(usize, usize), OnigmoError>> {
+        if self.last_end > self.heystack.len() {
+            return None;
+        }
+        self.region.clear();
+        match self.regex.search(
+            self.heystack,
+            self.last_end,
+            self.heystack.len(),
+            Some(&mut self.region),
+        ) {
+            Ok(pos) => pos?,
+            Err(err) => return Some(Err(err)),
+        };
+        let (s, e) = self.region.pos(0).unwrap();
+
+        // Don't accept empty matches immediately following the last match.
+        // i.e., no infinite loops please.
+        if e == s && self.last_match_end.map_or(false, |l| l == e) {
+            self.last_end += self.heystack[self.last_end..]
+                .chars()
+                .next()
+                .map(|c| c.len_utf8())
+                .unwrap_or(1);
+            return self.next();
+        } else {
+            self.last_end = e;
+            self.last_match_end = Some(e);
+        }
+
+        Some(Ok((s, e)))
+    }
+}
+
+impl<'r, 'h> std::iter::FusedIterator for FindMatches<'r, 'h> {}
+
+pub struct SubCaptures<'h> {
+    caps: &'h Captures<'h>,
     i: usize,
 }
 
-impl<'h> Iterator for CapturesIter<'h> {
+impl<'h> Iterator for SubCaptures<'h> {
     type Item = Match<'h>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let result = self.cap.get(self.i)?;
+        let result = self.caps.get(self.i)?;
         self.i += 1;
         Some(result)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let size = self.caps.len();
+        (size, Some(size))
+    }
+
+    fn count(self) -> usize {
+        self.caps.len()
+    }
+}
+
+#[derive(Debug)]
+#[repr(transparent)]
+pub struct Region(*mut OnigRegion);
+
+impl Drop for Region {
+    fn drop(&mut self) {
+        unsafe { onig_region_free(self.0, 1) };
+    }
+}
+
+impl Region {
+    pub fn new() -> Self {
+        let region = unsafe { onig_region_new() };
+        Self(region)
+    }
+
+    pub fn len(&self) -> usize {
+        unsafe { (*self.0).num_regs as usize }
+    }
+
+    pub fn beg(&self, i: usize) -> usize {
+        unsafe { *(*self.0).beg.add(i) as _ }
+    }
+
+    pub fn end(&self, i: usize) -> usize {
+        unsafe { *(*self.0).end.add(i) as _ }
+    }
+
+    pub fn pos(&self, i: usize) -> Option<(usize, usize)> {
+        if i < self.len() {
+            Some((self.beg(i), self.end(i)))
+        } else {
+            None
+        }
+    }
+
+    /// This can be used to clear out a region so it can be used
+    /// again.
+    pub fn clear(&mut self) {
+        unsafe { onig_region_clear(self.0) };
     }
 }
 
@@ -181,7 +390,6 @@ impl<'h> Iterator for CapturesIter<'h> {
 pub struct Regex {
     raw: *mut re_pattern_buffer,
     pattern: String,
-    error_info: OnigErrorInfo,
     option: u32,
 }
 
@@ -241,7 +449,6 @@ impl Regex {
         Ok(Self {
             raw,
             pattern,
-            error_info: unsafe { einfo.assume_init() },
             option,
         })
     }
@@ -262,7 +469,7 @@ impl Regex {
     /// ```rust
     /// # use onigmo_regex::*;
     ///
-    /// let mut re = OnigmoRegex::new(r"(\d{4})-(\d{2})-(\d{2})".to_string()).unwrap();
+    /// let mut re = Regex::new(r"(\d{4})-(\d{2})-(\d{2})").unwrap();
     /// let text = "The date was 2018-04-07";
     /// let captures = re.captures(text).unwrap().unwrap();
     ///
@@ -287,7 +494,7 @@ impl Regex {
     /// ```rust
     /// # use onigmo_regex::*;
     ///
-    /// let mut re = OnigmoRegex::new(r"(?m:^)(\d+)".to_string()).unwrap();
+    /// let mut re = Regex::new(r"(?m:^)(\d+)").unwrap();
     /// let text = "1 test 123\n2 foo";
     /// let captures = re.captures_from_pos(text, 7).unwrap().unwrap();
     ///
@@ -306,7 +513,7 @@ impl Regex {
         let hey_end = unsafe { hey_start.add(heystack.len()) };
         let range_start = unsafe { hey_start.add(pos) };
         let range_end = hey_end;
-        let region = unsafe { onig_region_new() };
+        let region = Region::new();
 
         let r = unsafe {
             onig_search(
@@ -315,17 +522,18 @@ impl Regex {
                 hey_end,
                 range_start,
                 range_end,
-                region,
-                ONIG_OPTION_NONE,
+                region.0,
+                self.option,
             )
         };
 
         if r >= 0 {
-            let len = unsafe { *region }.num_regs as usize;
+            let len = region.len();
             Ok(Some(Captures {
                 heystack,
                 len,
                 region,
+                offset: r as usize,
             }))
         } else if r == ONIG_MISMATCH as _ {
             Ok(None)
@@ -347,6 +555,146 @@ impl Regex {
                 message,
                 span: None,
             })
+        }
+    }
+
+    /// Returns an iterator over all the non-overlapping capture groups matched
+    /// in `text`. This is operationally the same as `find_iter` (except it
+    /// yields information about submatches).
+    ///
+    /// # Example
+    ///
+    /// We can use this to find all movie titles and their release years in
+    /// some text, where the movie is formatted like "'Title' (xxxx)":
+    ///
+    /// ```rust
+    /// # use onigmo_regex::*;
+    /// # fn main() {
+    /// let re = Regex::new(r"'([^']+)'\s+\((\d{4})\)").unwrap();
+    /// let heystack = "'Citizen Kane' (1941), 'The Wizard of Oz' (1939), 'M' (1931).";
+    /// let mut it = re.captures_iter(heystack).map(|caps| caps.unwrap());
+    /// let cap0 = it.next().unwrap();
+    /// assert_eq!(cap0.at(1).unwrap(), "Citizen Kane");
+    /// assert_eq!(cap0.at(2).unwrap(), "1941");
+    /// let cap1 = it.next().unwrap();
+    /// assert_eq!(cap1.at(1).unwrap(), "The Wizard of Oz");
+    /// assert_eq!(cap1.at(2).unwrap(), "1939");
+    /// let cap2 = it.next().unwrap();
+    /// assert_eq!(cap2.at(1).unwrap(), "M");
+    /// assert_eq!(cap2.at(2).unwrap(), "1931");
+    /// assert!(it.next().is_none());
+    /// # }
+    /// ```
+    pub fn captures_iter<'r, 'h>(&'r self, heystack: &'h str) -> FindCaptures<'r, 'h> {
+        FindCaptures {
+            regex: self,
+            heystack,
+            last_end: 0,
+            last_match_end: None,
+        }
+    }
+
+    /// Search pattern in string
+    ///
+    /// Search for matches the regex in a string. This method will return the
+    /// index of the first match of the regex within the string, if
+    /// there is one. If `from` is less than `to`, then search is performed
+    /// in forward order, otherwise – in backward order.
+    ///
+    /// # Arguments
+    ///
+    ///  * `heystack` - The string to search in.
+    ///  * `from` - The byte index in the passed slice to start search
+    ///  * `to` - The byte index in the passed slice to finish search
+    ///  * `options` - The options for the search.
+    ///  * `region` - The region for return group match range info
+    ///
+    /// # Returns
+    ///
+    /// `Some(pos)` if the regex matches, where `pos` is the
+    /// byte-position of the start of the match. `None` if the regex
+    /// doesn't match anywhere in `heystack`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use onigmo_regex::*;
+    ///
+    /// let r = Regex::new("l{1,2}").unwrap();
+    /// let res = r.search("hello", 0, 5, None).unwrap();
+    /// assert_eq!(Some(2), res); // match starts at character 3
+    /// ```
+    pub fn search(
+        &self,
+        heystack: &str,
+        from: usize,
+        to: usize,
+        region: Option<&mut Region>,
+    ) -> Result<Option<usize>, OnigmoError> {
+        let (beg, end) = (heystack.as_ptr(), unsafe {
+            heystack.as_ptr().add(heystack.len())
+        });
+        let r = unsafe {
+            let start = beg.add(from);
+            let range = beg.add(to);
+            if start > end {
+                return Err(OnigmoError::custom("Start of match should be before end"));
+            }
+            if range > end {
+                return Err(OnigmoError::custom("Limit of match should be before end"));
+            }
+            onig_search(
+                self.raw,
+                beg,
+                end,
+                start,
+                range,
+                match region {
+                    Some(region) => (*region).0,
+                    None => std::ptr::null_mut(),
+                },
+                self.option,
+            )
+        };
+
+        if r >= 0 {
+            Ok(Some(r as usize))
+        } else if r == ONIG_MISMATCH as isize {
+            Ok(None)
+        } else {
+            Err(OnigmoError::from_code(r))
+        }
+    }
+
+    /// Returns an iterator for each successive non-overlapping match in `heystack`,
+    /// returning the start and end byte indices with respect to `heystack`.
+    ///
+    /// # Example
+    ///
+    /// Find the start and end location of every word with exactly 13
+    /// characters:
+    ///
+    /// ```rust
+    /// # use onigmo_regex::*;
+    /// # fn main() {
+    /// let text = "Retroactively relinquishing remunerations is reprehensible.";
+    /// for pos in Regex::new(r"\b\w{13}\b").unwrap().find_iter(text) {
+    ///     println!("{:?}", pos);
+    /// }
+    /// // Output:
+    /// // (0, 13)
+    /// // (14, 27)
+    /// // (28, 41)
+    /// // (45, 58)
+    /// # }
+    /// ```
+    pub fn find_iter<'r, 'h>(&'r self, heystack: &'h str) -> FindMatches<'r, 'h> {
+        FindMatches {
+            regex: self,
+            region: Region::new(),
+            heystack,
+            last_end: 0,
+            last_match_end: None,
         }
     }
 
@@ -379,7 +727,7 @@ extern "C" fn names_callback(
     f: *mut std::ffi::c_void,
 ) -> i32 {
     let name = unsafe {
-        std::slice::from_raw_parts(name_start, name_end.offset_from_unsigned(name_start))
+        std::slice::from_raw_parts(name_start, name_end.offset_from(name_start) as usize)
     };
     let id = unsafe { *id } as usize;
     let name = match std::str::from_utf8(name) {
@@ -417,13 +765,17 @@ mod test {
     }
 
     #[test]
-    fn test() {
+    fn test_match() {
         let _ = unsafe { onig_init() };
         // /[a-z[0-9]]/.match("y") # => #<MatchData "y">
         assert_regex(Some(&["y"]), "y", r#"[a-z[0-9]]"#);
         // /[a-z[0-9]]/.match("[") # => nil
         assert_regex(None, "[", r#"[a-z[0-9]]"#);
         // r = /[a-w&&[^c-g]e]/ # ([a-w] かつ ([^c-g] もしくは e)) つまり [abeh-w] と同じ
+    }
+
+    #[test]
+    fn char_class() {
         let pat = r#"[a-w&&[^c-g]e]"#;
         // r.match("b") # => #<MatchData "b">
         assert_regex(Some(&["b"]), "b", pat);
@@ -439,8 +791,16 @@ mod test {
         assert_regex(Some(&["w"]), "w", pat);
         // r.match("z") # => nil
         assert_regex(None, "z", pat);
+    }
+
+    #[test]
+    fn back_reference() {
         // /(.)(.)\k<-2>\k<-1>/.match("xyzyz") # => #<MatchData "yzyz" 1:"y" 2:"z">
         assert_regex(Some(&["yzyz", "y", "z"]), "xyzyz", r#"(.)(.)\k<-2>\k<-1>"#);
+    }
+
+    #[test]
+    fn grouping() {
         // /([aeiou]\w){2}/.match("Caenorhabditis elegans") #=> #<MatchData "enor" 1:"or">
         assert_regex(
             Some(&["enor", "or"]),
@@ -461,12 +821,20 @@ mod test {
             "Investigations",
             r#"I(?:n)ves(ti)ga\1ons"#,
         );
+    }
+
+    #[test]
+    fn subexpression() {
         // /\A(?<a>|.|(?:(?<b>.)\g<a>\k<b+0>))\z/.match("rekxker") # => #<MatchData "rekxker" a:"rekxker" b:"k">
         assert_regex(
             Some(&["rekxker", "rekxker", "k"]),
             "rekxker",
             r#"\A(?<a>|.|(?:(?<b>.)\g<a>\k<b+0>))\z"#,
         );
+    }
+
+    #[test]
+    fn lookahead() {
         // /(?<=<b>)\w+(?=<\/b>)/.match("Fortune favours the <b>bold</b>") # => #<MatchData "bold">
         assert_regex(
             Some(&["bold"]),
@@ -479,6 +847,10 @@ mod test {
             "Fortune favours the <b>bold</b>",
             r#"<b>\K\w+(?=<\/b>)"#,
         );
+    }
+
+    #[test]
+    fn options() {
         // /a(?i:b)c/.match("aBc") # => #<MatchData "aBc">
         assert_regex(Some(&["aBc"]), "aBc", r#"a(?i:b)c"#);
         // /a(?i:b)c/.match("abc") # => #<MatchData "abc">
@@ -521,5 +893,18 @@ mod test {
         \z"##,
             OnigmoOption::FreeFormat | OnigmoOption::IgnoreCase,
         );
+    }
+
+    #[test]
+    fn find_iter() {
+        let text = "Retroactively relinquishing remunerations is reprehensible.";
+        for pos in Regex::new(r"\b\w{13}\b").unwrap().find_iter(text) {
+            println!("{:?}", pos);
+        }
+        // Output:
+        // (0, 13)
+        // (14, 27)
+        // (28, 41)
+        // (45, 58)
     }
 }
