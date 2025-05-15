@@ -18,6 +18,12 @@ pub struct OnigmoError {
     span: Option<(usize, usize)>,
 }
 
+impl std::fmt::Display for OnigmoError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
 #[derive(Debug)]
 pub enum OnigmoErrKind {
     InvalidPattern = -1,
@@ -84,6 +90,10 @@ impl<'h> Match<'h> {
     /// always safe to slice the corresponding haystack using this offset.
     pub fn end(&self) -> usize {
         self.end
+    }
+
+    pub fn range(&self) -> std::ops::Range<usize> {
+        self.start..self.end
     }
 }
 
@@ -167,6 +177,7 @@ impl<'h> Iterator for CapturesIter<'h> {
 }
 
 /// A compilled regular expression.
+#[derive(Debug)]
 pub struct Regex {
     raw: *mut re_pattern_buffer,
     pattern: String,
@@ -174,19 +185,23 @@ pub struct Regex {
     option: u32,
 }
 
+unsafe impl Send for Regex {}
+unsafe impl Sync for Regex {}
+
 impl Regex {
     /// Parse and compile a regex with default options.
     ///
     /// Returns an `OnigmoError` if the pattern could not be parsed.
-    pub fn new(pattern: String) -> Result<Self, OnigmoError> {
+    pub fn new(pattern: &str) -> Result<Self, OnigmoError> {
         Self::new_with_option(pattern, OnigmoOption::None)
     }
 
     /// Parse and compile a regex with given options.
     ///
     /// Returns an `OnigmoError` if the pattern could not be parsed.
-    pub fn new_with_option(pattern: String, option: u32) -> Result<Self, OnigmoError> {
+    pub fn new_with_option(pattern: &str, option: u32) -> Result<Self, OnigmoError> {
         let mut raw = std::ptr::null_mut();
+        let pattern = pattern.to_string();
         let pattern_start: *const u8 = pattern.as_ptr();
         let pattern_end = unsafe { pattern_start.add(pattern.len()) };
         let mut einfo = std::mem::MaybeUninit::uninit();
@@ -256,7 +271,7 @@ impl Regex {
     /// assert_eq!(captures.get(3).unwrap().as_str(), "07");
     /// assert_eq!(captures.get(0).unwrap().as_str(), "2018-04-07");
     /// ```
-    pub fn captures<'h>(&mut self, heystack: &'h str) -> Result<Option<Captures<'h>>, OnigmoError> {
+    pub fn captures<'h>(&self, heystack: &'h str) -> Result<Option<Captures<'h>>, OnigmoError> {
         self.captures_from_pos(heystack, 0)
     }
 
@@ -283,7 +298,7 @@ impl Regex {
     /// ```
     ///
     pub fn captures_from_pos<'h>(
-        &mut self,
+        &self,
         heystack: &'h str,
         pos: usize,
     ) -> Result<Option<Captures<'h>>, OnigmoError> {
@@ -390,7 +405,7 @@ mod test {
         pattern: &str,
         option: u32,
     ) {
-        let actual: Option<Vec<String>> = Regex::new_with_option(pattern.to_string(), option)
+        let actual: Option<Vec<String>> = Regex::new_with_option(pattern, option)
             .unwrap()
             .captures(heystack)
             .unwrap()
