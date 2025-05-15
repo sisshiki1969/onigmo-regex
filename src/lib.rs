@@ -167,14 +167,14 @@ impl<'h> Iterator for CapturesIter<'h> {
 }
 
 /// A compilled regular expression.
-pub struct OnigmoRegex {
+pub struct Regex {
     raw: *mut re_pattern_buffer,
     pattern: String,
     error_info: OnigErrorInfo,
     option: u32,
 }
 
-impl OnigmoRegex {
+impl Regex {
     /// Parse and compile a regex with default options.
     ///
     /// Returns an `OnigmoError` if the pattern could not be parsed.
@@ -390,7 +390,7 @@ mod test {
         pattern: &str,
         option: u32,
     ) {
-        let actual: Option<Vec<String>> = OnigmoRegex::new_with_option(pattern.to_string(), option)
+        let actual: Option<Vec<String>> = Regex::new_with_option(pattern.to_string(), option)
             .unwrap()
             .captures(heystack)
             .unwrap()
