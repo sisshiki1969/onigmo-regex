@@ -89,6 +89,11 @@ impl<'h> Match<'h> {
         &self.heystack[self.start..self.end]
     }
 
+    /// Returns the substring of the haystack behind the matched substring.
+    pub fn post(&'h self) -> &'h str {
+        &self.heystack[self.end..]
+    }
+
     /// Returns the substring of the haystack that matched as `String`.
     pub fn to_string(&'h self) -> String {
         self.as_str().to_string()
@@ -205,6 +210,33 @@ impl<'h> Captures<'h> {
     }
 }
 
+pub struct SubCaptures<'h> {
+    caps: &'h Captures<'h>,
+    i: usize,
+}
+
+impl<'h> Iterator for SubCaptures<'h> {
+    type Item = Option<Match<'h>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.i >= self.caps.len() {
+            return None;
+        }
+        let result = self.caps.get(self.i);
+        self.i += 1;
+        Some(result)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let size = self.caps.len() - self.i;
+        (size, Some(size))
+    }
+
+    fn count(self) -> usize {
+        self.caps.len() - self.i
+    }
+}
+
 /// An iterator that yields all non-overlapping capture groups matching a
 /// particular regular expression.
 ///
@@ -316,30 +348,6 @@ impl<'r, 'h> Iterator for FindMatches<'r, 'h> {
 }
 
 impl<'r, 'h> std::iter::FusedIterator for FindMatches<'r, 'h> {}
-
-pub struct SubCaptures<'h> {
-    caps: &'h Captures<'h>,
-    i: usize,
-}
-
-impl<'h> Iterator for SubCaptures<'h> {
-    type Item = Match<'h>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let result = self.caps.get(self.i)?;
-        self.i += 1;
-        Some(result)
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        let size = self.caps.len();
-        (size, Some(size))
-    }
-
-    fn count(self) -> usize {
-        self.caps.len()
-    }
-}
 
 #[repr(transparent)]
 pub struct Region(*mut OnigRegion);
@@ -649,9 +657,8 @@ impl Regex {
         to: usize,
         region: Option<&mut Region>,
     ) -> Result<Option<usize>, OnigmoError> {
-        let (beg, end) = (heystack.as_ptr(), unsafe {
-            heystack.as_ptr().add(heystack.len())
-        });
+        let beg = heystack.as_ptr();
+        let end = unsafe { beg.add(heystack.len()) };
         let r = unsafe {
             let start = beg.add(from);
             let range = beg.add(to);
@@ -804,7 +811,7 @@ mod test {
             .unwrap()
             .captures(heystack)
             .unwrap()
-            .map(|c| c.iter().map(|s| s.to_string()).collect());
+            .map(|c| c.iter().flat_map(|s| s.map(|s| s.to_string())).collect());
         assert_eq!(
             expected.map(|s| s.into_iter().map(|c| c.to_string()).collect::<Vec<_>>()),
             actual
