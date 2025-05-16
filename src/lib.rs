@@ -123,6 +123,12 @@ impl<'h> Match<'h> {
         self.end
     }
 
+    /// Returns the range over the starting and ending byte offsets of the
+    /// match in the haystack.
+    ///
+    /// It is always correct to slice the original haystack searched with this
+    /// range. That is, because the offsets are guaranteed to fall on valid
+    /// UTF-8 boundaries, the range returned is always valid.
     pub fn range(&self) -> std::ops::Range<usize> {
         self.start..self.end
     }
@@ -141,7 +147,6 @@ impl<'h> Match<'h> {
 #[derive(Debug)]
 pub struct Captures<'h> {
     heystack: &'h str,
-    len: usize,
     region: Region,
     offset: usize,
 }
@@ -167,17 +172,12 @@ impl<'h> Captures<'h> {
     ///
     /// When `i == 0`, this is guaranteed to return a non-`None` value.
     pub fn get(&'h self, i: usize) -> Option<Match<'h>> {
-        let start = self.region.beg(i);
-        let end = self.region.end(i);
-        if i < self.len {
-            Some(Match {
-                heystack: self.heystack,
-                start,
-                end,
-            })
-        } else {
-            None
-        }
+        let (start, end) = self.region.pos(i)?;
+        Some(Match {
+            heystack: self.heystack,
+            start,
+            end,
+        })
     }
 
     /// Returns the total number of capture groups. This includes both
@@ -188,7 +188,7 @@ impl<'h> Captures<'h> {
     /// greater than zero since every `Captures` value always includes the
     /// match for the entire regex.
     pub fn len(&self) -> usize {
-        self.len
+        self.region.len()
     }
 
     /// Returns an iterator over all capture groups. This includes both
@@ -254,7 +254,6 @@ impl<'r, 'h> Iterator for FindCaptures<'r, 'h> {
         }
         Some(Ok(Captures {
             heystack: self.heystack,
-            len: region.len(),
             region,
             offset: r,
         }))
@@ -342,13 +341,19 @@ impl<'h> Iterator for SubCaptures<'h> {
     }
 }
 
-#[derive(Debug)]
 #[repr(transparent)]
 pub struct Region(*mut OnigRegion);
 
-impl Drop for Region {
-    fn drop(&mut self) {
-        unsafe { onig_region_free(self.0, 1) };
+impl std::fmt::Debug for Region {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Region( ")?;
+        for i in 0..self.len() {
+            match self.pos(i) {
+                Some((beg, end)) => write!(f, "[{}..{}] ", beg, end)?,
+                None => write!(f, "[] ")?,
+            }
+        }
+        write!(f, ")")
     }
 }
 
@@ -362,20 +367,35 @@ impl Region {
         unsafe { (*self.0).num_regs as usize }
     }
 
-    pub fn beg(&self, i: usize) -> usize {
-        unsafe { *(*self.0).beg.add(i) as _ }
+    fn beg(&self, i: usize) -> Option<usize> {
+        unsafe {
+            let idx = *(*self.0).beg.add(i);
+            if idx == ONIG_REGION_NOTPOS as _ {
+                None
+            } else {
+                Some(idx as usize)
+            }
+        }
     }
 
-    pub fn end(&self, i: usize) -> usize {
-        unsafe { *(*self.0).end.add(i) as _ }
+    fn end(&self, i: usize) -> Option<usize> {
+        unsafe {
+            let idx = *(*self.0).end.add(i);
+            if idx == ONIG_REGION_NOTPOS as _ {
+                None
+            } else {
+                Some(idx as usize)
+            }
+        }
     }
 
     pub fn pos(&self, i: usize) -> Option<(usize, usize)> {
         if i < self.len() {
-            Some((self.beg(i), self.end(i)))
-        } else {
-            None
+            if let Some(beg) = self.beg(i) {
+                return Some((beg, self.end(i).unwrap()));
+            }
         }
+        None
     }
 
     /// This can be used to clear out a region so it can be used
@@ -528,10 +548,8 @@ impl Regex {
         };
 
         if r >= 0 {
-            let len = region.len();
             Ok(Some(Captures {
                 heystack,
-                len,
                 region,
                 offset: r as usize,
             }))
@@ -594,7 +612,7 @@ impl Regex {
         }
     }
 
-    /// Search pattern in string
+    /// Search pattern in string.
     ///
     /// Search for matches the regex in a string. This method will return the
     /// index of the first match of the regex within the string, if
@@ -664,6 +682,35 @@ impl Regex {
         } else {
             Err(OnigmoError::from_code(r))
         }
+    }
+
+    /// Find pattern in string.
+    ///
+    /// Finds the first match of the regular expression within the
+    /// string.
+    ///
+    /// # Arguments
+    ///  * `heystack` - The text to search in.
+    ///
+    /// # Returns
+    ///
+    ///  The offset of the start and end of the first match. If no
+    ///  match exists `None` is returned.
+    /// # Examples
+    ///
+    /// ```
+    /// # use onigmo_regex::*;
+    ///
+    /// let r = Regex::new("l{1,2}").unwrap();
+    /// let res = r.find("hello").unwrap();
+    /// assert_eq!(Some((2, 4)), res);
+    /// ```
+    pub fn find(&self, heystack: &str) -> Result<Option<(usize, usize)>, OnigmoError> {
+        let mut region = Region::new();
+        let len = heystack.len();
+        Ok(self
+            .search(heystack, 0, len, Some(&mut region))?
+            .and_then(|_| region.pos(0)))
     }
 
     /// Returns an iterator for each successive non-overlapping match in `heystack`,
