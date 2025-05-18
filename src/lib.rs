@@ -486,6 +486,11 @@ impl Regex {
         &self.pattern
     }
 
+    /// Returns the pattern string.
+    pub fn option(&self) -> u32 {
+        self.option
+    }
+
     /// Returns the capture groups for the first match in `heystack`.
     ///
     /// If no match is found, then `Ok(None)` is returned.
