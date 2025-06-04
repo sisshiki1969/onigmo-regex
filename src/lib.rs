@@ -551,4 +551,17 @@ mod test {
         // (28, 41)
         // (45, 58)
     }
+
+    #[test]
+    fn capture_names() {
+        let re = Regex::new(r"(?<A::B>.)(?<a>.)(.)(?<foo-bar>.)").unwrap();
+        assert_eq!(
+            vec![
+                ("A::B".to_string(), 1),
+                ("a".to_string(), 2),
+                ("foo-bar".to_string(), 3)
+            ],
+            re.names().unwrap()
+        );
+    }
 }
