@@ -346,8 +346,32 @@ impl Regex {
         FindMatches::new(self, heystack)
     }
 
-    pub fn names(&self) -> Result<Vec<(String, usize)>, OnigmoError> {
-        let mut names: Vec<(String, usize)> = vec![];
+    /// Enumerate capture names, returning a vector of names for each capture group.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # use onigmo_regex::*;
+    /// let re = Regex::new(r"(?<year>\d{4})-(?<month>\d{2})-(?<day>\d{2})").unwrap();
+    /// let names = re.capture_names().unwrap();
+    /// assert_eq!(names, vec!["year".to_string(), "month".to_string(), "day".to_string()]);
+    /// ```
+    ///
+    /// ```rust
+    /// # use onigmo_regex::*;
+    /// let re = Regex::new(r"(?<A::B>.)(?<a>.)(.)(?<foo-bar>.)(.)(?<foo-bar>x)?(?<Ruby>.)").unwrap();
+    /// let names = re.capture_names().unwrap();
+    /// assert_eq!(names, vec![
+    ///     "A::B".to_string(),
+    ///     "a".to_string(),
+    ///     "foo-bar".to_string(),
+    ///     "foo-bar".to_string(),
+    ///     "Ruby".to_string(),
+    /// ]);
+    /// ```
+    pub fn capture_names(&self) -> Result<Vec<String>, OnigmoError> {
+        let len = unsafe { onig_number_of_captures(self.raw) } as usize;
+        let mut names = vec![String::new(); len];
         let res = unsafe {
             onig_foreach_name(
                 self.raw,
@@ -360,26 +384,60 @@ impl Regex {
         }
         Ok(names)
     }
+
+    /// Returns the list of group numbers for a given named capture.
+    /// If the name does not exist or has no captures, `None` is returned.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # use onigmo_regex::*;
+    /// let re = Regex::new(r"(?<year>\d{4})-(?<month>\d{2})-(?<day>\d{2})").unwrap();
+    /// let nums = re.get_group_nembers("year");
+    /// assert_eq!(nums, vec![1]);
+    /// ```
+    ///
+    /// ```rust
+    /// # use onigmo_regex::*;
+    /// let re = Regex::new(r"(?<A::B>.)(?<a>.)(.)(?<foo-bar>.)(.)(?<foo-bar>x)?(?<Ruby>.)").unwrap();
+    /// let nums = re.get_group_nembers("foo-bar");
+    /// assert_eq!(nums, vec![3, 4]);
+    /// ```
+    pub fn get_group_nembers(&self, name: &str) -> Vec<i32> {
+        let mut nums: *mut std::os::raw::c_int = std::ptr::null_mut();
+        let name_start = name.as_ptr();
+        let name_end = unsafe { name_start.add(name.len()) };
+        let r =
+            unsafe { onig_name_to_group_numbers(self.raw, name_start, name_end, &mut nums as _) };
+        if r <= 0 {
+            return vec![];
+        }
+        let len = r as usize;
+        unsafe { std::slice::from_raw_parts(nums, len) }.to_vec()
+    }
 }
 
 extern "C" fn names_callback(
     name_start: *const u8,
     name_end: *const u8,
-    group: i32,
-    id: *mut i32,
+    group_len: i32,
+    group_list: *mut i32,
     _buf: *mut re_pattern_buffer,
     f: *mut std::ffi::c_void,
 ) -> i32 {
     let name = unsafe {
         std::slice::from_raw_parts(name_start, name_end.offset_from(name_start) as usize)
     };
-    let id = unsafe { *id } as usize;
     let name = match std::str::from_utf8(name) {
         Ok(name) => name,
         Err(_) => return -1i32,
     };
-    let v: &mut Vec<(String, usize)> = unsafe { &mut *(f as *mut Vec<(String, usize)>) };
-    v.push((name.to_string(), id));
+    let v = unsafe { &mut *(f as *mut Vec<String>) };
+    let list =
+        unsafe { std::slice::from_raw_parts(group_list as *const _, group_len as usize).iter() };
+    for i in list {
+        v[*i as usize - 1] = name.to_string();
+    }
     0
 }
 
@@ -550,18 +608,5 @@ mod test {
         // (14, 27)
         // (28, 41)
         // (45, 58)
-    }
-
-    #[test]
-    fn capture_names() {
-        let re = Regex::new(r"(?<A::B>.)(?<a>.)(.)(?<foo-bar>.)").unwrap();
-        assert_eq!(
-            vec![
-                ("A::B".to_string(), 1),
-                ("a".to_string(), 2),
-                ("foo-bar".to_string(), 3)
-            ],
-            re.names().unwrap()
-        );
     }
 }
