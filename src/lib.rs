@@ -348,6 +348,8 @@ impl Regex {
 
     /// Enumerate capture names, returning a vector of names for each capture group.
     ///
+    /// If the regex has no named captures, an empty vector is returned.
+    ///
     /// # Example
     ///
     /// ```rust
@@ -369,7 +371,17 @@ impl Regex {
     ///     "Ruby".to_string(),
     /// ]);
     /// ```
+    ///
+    /// ```rust
+    /// # use onigmo_regex::*;
+    /// let re = Regex::new(r"(\d{4})-(\d{2})-(\d{2})").unwrap();
+    /// let names = re.capture_names().unwrap();
+    /// assert!(names.is_empty());
+    /// ```
     pub fn capture_names(&self) -> Result<Vec<String>, OnigmoError> {
+        if unsafe { onig_number_of_names(self.raw) } == 0 {
+            return Ok(vec![]);
+        }
         let len = unsafe { onig_number_of_captures(self.raw) } as usize;
         let mut names = vec![String::new(); len];
         let res = unsafe {
