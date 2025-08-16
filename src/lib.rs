@@ -19,6 +19,23 @@ pub mod OnigmoOption {
     pub const DotAll: u32 = crate::ONIG_OPTION_DOTALL;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OnigmoEncoding {
+    UTF8,
+    ASCII,
+}
+
+impl OnigmoEncoding {
+    pub fn as_type(&self) -> OnigEncoding {
+        unsafe {
+            match self {
+                OnigmoEncoding::UTF8 => &OnigEncodingUTF_8 as _,
+                OnigmoEncoding::ASCII => &OnigEncodingASCII as _,
+            }
+        }
+    }
+}
+
 /// A compilled regular expression.
 #[derive(Debug)]
 pub struct Regex {
@@ -50,6 +67,17 @@ impl Regex {
     ///
     /// Returns an `OnigmoError` if the pattern could not be parsed.
     pub fn new_with_option(pattern: &str, option: u32) -> Result<Self, OnigmoError> {
+        Self::new_with_option_and_encoding(pattern, option, OnigmoEncoding::UTF8)
+    }
+
+    /// Parse and compile a regex with given options.
+    ///
+    /// Returns an `OnigmoError` if the pattern could not be parsed.
+    pub fn new_with_option_and_encoding(
+        pattern: &str,
+        option: u32,
+        encoding: OnigmoEncoding,
+    ) -> Result<Self, OnigmoError> {
         let mut raw = std::ptr::null_mut();
         let pattern = pattern.to_string();
         let pattern_start: *const u8 = pattern.as_ptr();
@@ -61,7 +89,7 @@ impl Regex {
                 pattern_start,
                 pattern_end,
                 option as u32,
-                &OnigEncodingUTF_8 as _,
+                encoding.as_type(),
                 &OnigSyntaxRuby as _,
                 einfo.as_mut_ptr(),
             )
