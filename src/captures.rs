@@ -155,6 +155,52 @@ impl<'h> Match<'h> {
     }
 }
 
+/// Byte-slice analogue of [`Captures`] for non-UTF-8 haystacks.
+///
+/// Produced by [`Regex::captures_bytes`] and
+/// [`Regex::captures_bytes_from_pos`]. Positions are byte offsets
+/// into the original haystack `&[u8]`; interpretation of those bytes
+/// under a multi-byte encoding (Shift_JIS, EUC-JP, ...) is the
+/// caller's responsibility.
+#[derive(Debug)]
+pub struct CapturesBytes<'h> {
+    heystack: &'h [u8],
+    region: Region,
+    offset: usize,
+}
+
+impl<'h> CapturesBytes<'h> {
+    pub(crate) fn new(heystack: &'h [u8], region: Region, offset: usize) -> Self {
+        Self { heystack, region, offset }
+    }
+
+    /// Start / end byte offsets of the Nth capture group in the
+    /// haystack, or `None` if the group did not participate.
+    pub fn pos(&self, pos: usize) -> Option<(usize, usize)> {
+        self.region.pos(pos)
+    }
+
+    /// Byte slice of the Nth capture group, or `None`.
+    pub fn at(&self, pos: usize) -> Option<&'h [u8]> {
+        self.pos(pos).map(|(b, e)| &self.heystack[b..e])
+    }
+
+    /// Start byte offset of the whole match. Same as `pos(0).0`.
+    pub fn offset(&self) -> usize {
+        self.offset
+    }
+
+    /// Number of capture groups (including the group-0 whole match).
+    pub fn len(&self) -> usize {
+        self.region.len()
+    }
+
+    /// Whole haystack this match refers into.
+    pub fn heystack(&self) -> &'h [u8] {
+        self.heystack
+    }
+}
+
 pub struct SubCaptures<'h> {
     caps: &'h Captures<'h>,
     i: usize,

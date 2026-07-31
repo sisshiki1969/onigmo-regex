@@ -143,6 +143,14 @@ fn compile() {
         "enc/big5.c",
         "enc/gb18030.c",
         "enc/koi8_r.c",
+        "enc/koi8_u.c",
+        "enc/windows_31j.c",
+        "enc/windows_1250.c",
+        "enc/windows_1251.c",
+        "enc/windows_1252.c",
+        "enc/windows_1253.c",
+        "enc/windows_1254.c",
+        "enc/windows_1257.c",
     ];
     for file in files.iter() {
         cc.file(src.join(file));

@@ -8,7 +8,7 @@ mod captures;
 mod error;
 mod region;
 
-pub use captures::{Captures, FindCaptures, FindMatches, Match, SubCaptures};
+pub use captures::{Captures, CapturesBytes, FindCaptures, FindMatches, Match, SubCaptures};
 pub use error::OnigmoError;
 pub use region::Region;
 
@@ -23,14 +23,84 @@ pub mod OnigmoOption {
 pub enum OnigmoEncoding {
     UTF8,
     ASCII,
+    UTF16BE,
+    UTF16LE,
+    UTF32BE,
+    UTF32LE,
+    EUC_JP,
+    EUC_CN,
+    EUC_KR,
+    EUC_TW,
+    Shift_JIS,
+    Windows_31J,
+    Big5,
+    GB18030,
+    KOI8_R,
+    KOI8_U,
+    ISO_8859_1,
+    ISO_8859_2,
+    ISO_8859_3,
+    ISO_8859_4,
+    ISO_8859_5,
+    ISO_8859_6,
+    ISO_8859_7,
+    ISO_8859_8,
+    ISO_8859_9,
+    ISO_8859_10,
+    ISO_8859_11,
+    ISO_8859_13,
+    ISO_8859_14,
+    ISO_8859_15,
+    ISO_8859_16,
+    Windows_1250,
+    Windows_1251,
+    Windows_1252,
+    Windows_1253,
+    Windows_1254,
+    Windows_1257,
 }
 
 impl OnigmoEncoding {
     pub fn as_type(&self) -> OnigEncoding {
         unsafe {
             match self {
-                OnigmoEncoding::UTF8 => &OnigEncodingUTF_8 as _,
-                OnigmoEncoding::ASCII => &OnigEncodingASCII as _,
+                OnigmoEncoding::UTF8         => &OnigEncodingUTF_8 as _,
+                OnigmoEncoding::ASCII        => &OnigEncodingASCII as _,
+                OnigmoEncoding::UTF16BE      => &OnigEncodingUTF_16BE as _,
+                OnigmoEncoding::UTF16LE      => &OnigEncodingUTF_16LE as _,
+                OnigmoEncoding::UTF32BE      => &OnigEncodingUTF_32BE as _,
+                OnigmoEncoding::UTF32LE      => &OnigEncodingUTF_32LE as _,
+                OnigmoEncoding::EUC_JP       => &OnigEncodingEUC_JP as _,
+                OnigmoEncoding::EUC_CN       => &OnigEncodingEUC_CN as _,
+                OnigmoEncoding::EUC_KR       => &OnigEncodingEUC_KR as _,
+                OnigmoEncoding::EUC_TW       => &OnigEncodingEUC_TW as _,
+                OnigmoEncoding::Shift_JIS    => &OnigEncodingShift_JIS as _,
+                OnigmoEncoding::Windows_31J  => &OnigEncodingWindows_31J as _,
+                OnigmoEncoding::Big5         => &OnigEncodingBIG5 as _,
+                OnigmoEncoding::GB18030      => &OnigEncodingGB18030 as _,
+                OnigmoEncoding::KOI8_R       => &OnigEncodingKOI8_R as _,
+                OnigmoEncoding::KOI8_U       => &OnigEncodingKOI8_U as _,
+                OnigmoEncoding::ISO_8859_1   => &OnigEncodingISO_8859_1 as _,
+                OnigmoEncoding::ISO_8859_2   => &OnigEncodingISO_8859_2 as _,
+                OnigmoEncoding::ISO_8859_3   => &OnigEncodingISO_8859_3 as _,
+                OnigmoEncoding::ISO_8859_4   => &OnigEncodingISO_8859_4 as _,
+                OnigmoEncoding::ISO_8859_5   => &OnigEncodingISO_8859_5 as _,
+                OnigmoEncoding::ISO_8859_6   => &OnigEncodingISO_8859_6 as _,
+                OnigmoEncoding::ISO_8859_7   => &OnigEncodingISO_8859_7 as _,
+                OnigmoEncoding::ISO_8859_8   => &OnigEncodingISO_8859_8 as _,
+                OnigmoEncoding::ISO_8859_9   => &OnigEncodingISO_8859_9 as _,
+                OnigmoEncoding::ISO_8859_10  => &OnigEncodingISO_8859_10 as _,
+                OnigmoEncoding::ISO_8859_11  => &OnigEncodingISO_8859_11 as _,
+                OnigmoEncoding::ISO_8859_13  => &OnigEncodingISO_8859_13 as _,
+                OnigmoEncoding::ISO_8859_14  => &OnigEncodingISO_8859_14 as _,
+                OnigmoEncoding::ISO_8859_15  => &OnigEncodingISO_8859_15 as _,
+                OnigmoEncoding::ISO_8859_16  => &OnigEncodingISO_8859_16 as _,
+                OnigmoEncoding::Windows_1250 => &OnigEncodingWindows_1250 as _,
+                OnigmoEncoding::Windows_1251 => &OnigEncodingWindows_1251 as _,
+                OnigmoEncoding::Windows_1252 => &OnigEncodingWindows_1252 as _,
+                OnigmoEncoding::Windows_1253 => &OnigEncodingWindows_1253 as _,
+                OnigmoEncoding::Windows_1254 => &OnigEncodingWindows_1254 as _,
+                OnigmoEncoding::Windows_1257 => &OnigEncodingWindows_1257 as _,
             }
         }
     }
@@ -40,8 +110,12 @@ impl OnigmoEncoding {
 #[derive(Debug)]
 pub struct Regex {
     raw: *mut re_pattern_buffer,
-    pattern: String,
+    /// The pattern bytes as compiled. UTF-8 for regexes built via
+    /// [`Regex::new`] and friends; arbitrary bytes (interpreted under
+    /// the compile-time encoding) for [`Regex::new_bytes_with_encoding`].
+    pattern: Vec<u8>,
     option: u32,
+    encoding: OnigmoEncoding,
 }
 
 unsafe impl Send for Regex {}
@@ -78,8 +152,23 @@ impl Regex {
         option: u32,
         encoding: OnigmoEncoding,
     ) -> Result<Self, OnigmoError> {
+        Self::new_bytes_with_encoding(pattern.as_bytes(), option, encoding)
+    }
+
+    /// Parse and compile a regex from arbitrary bytes under the given
+    /// [`OnigmoEncoding`].
+    ///
+    /// Use this for non-UTF-8 patterns (Shift_JIS, EUC-JP, ISO-8859,
+    /// ...); the bytes are handed to Onigmo verbatim and interpreted
+    /// under `encoding`. For UTF-8 patterns prefer [`Regex::new`] /
+    /// [`Regex::new_with_option_and_encoding`], which take a `&str`.
+    pub fn new_bytes_with_encoding(
+        pattern: &[u8],
+        option: u32,
+        encoding: OnigmoEncoding,
+    ) -> Result<Self, OnigmoError> {
         let mut raw = std::ptr::null_mut();
-        let pattern = pattern.to_string();
+        let pattern: Vec<u8> = pattern.to_vec();
         let pattern_start: *const u8 = pattern.as_ptr();
         let pattern_end = unsafe { pattern_start.add(pattern.len()) };
         let mut einfo = std::mem::MaybeUninit::uninit();
@@ -116,17 +205,34 @@ impl Regex {
             raw,
             pattern,
             option,
+            encoding,
         })
     }
 
-    /// Returns the pattern string.
+    /// Returns the pattern as a `&str`.
+    ///
+    /// Panics if the pattern is not valid UTF-8 (only possible for
+    /// regexes built with [`Regex::new_bytes_with_encoding`]). Use
+    /// [`Regex::as_bytes`] to get the raw pattern bytes safely.
     pub fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.pattern)
+            .expect("regex pattern is not UTF-8; use as_bytes()")
+    }
+
+    /// Returns the pattern bytes as compiled. This is the same slice
+    /// that was handed to Onigmo.
+    pub fn as_bytes(&self) -> &[u8] {
         &self.pattern
     }
 
-    /// Returns the pattern string.
+    /// Returns the compile-time option bits (`ONIG_OPTION_*`).
     pub fn option(&self) -> u32 {
         self.option
+    }
+
+    /// Returns the encoding this regex was compiled under.
+    pub fn encoding(&self) -> OnigmoEncoding {
+        self.encoding
     }
 
     /// Returns the capture groups for the first match in `heystack`.
@@ -246,6 +352,103 @@ impl Regex {
     /// ```
     pub fn captures_iter<'r, 'h>(&'r self, heystack: &'h str) -> FindCaptures<'r, 'h> {
         FindCaptures::new(self, heystack)
+    }
+
+    /// Byte-slice analogue of [`Regex::captures`] for non-UTF-8
+    /// haystacks (Shift_JIS / EUC-JP / ISO-8859 / ...). The regex
+    /// should have been compiled with a matching `OnigmoEncoding`,
+    /// otherwise Onigmo may report an encoding-mismatch error.
+    pub fn captures_bytes<'h>(
+        &self,
+        heystack: &'h [u8],
+    ) -> Result<Option<CapturesBytes<'h>>, OnigmoError> {
+        self.captures_bytes_from_pos(heystack, 0)
+    }
+
+    /// Byte-slice analogue of [`Regex::captures_from_pos`].
+    pub fn captures_bytes_from_pos<'h>(
+        &self,
+        heystack: &'h [u8],
+        pos: usize,
+    ) -> Result<Option<CapturesBytes<'h>>, OnigmoError> {
+        let hey_start = heystack.as_ptr();
+        let hey_end = unsafe { hey_start.add(heystack.len()) };
+        let range_start = unsafe { hey_start.add(pos) };
+        let range_end = hey_end;
+        let region = Region::new();
+
+        let r = unsafe {
+            onig_search(
+                self.raw,
+                hey_start,
+                hey_end,
+                range_start,
+                range_end,
+                region.raw(),
+                self.option,
+            )
+        };
+
+        if r >= 0 {
+            Ok(Some(CapturesBytes::new(heystack, region, r as usize)))
+        } else if r == ONIG_MISMATCH as _ {
+            Ok(None)
+        } else {
+            let mut s = [0; ONIG_MAX_ERROR_MESSAGE_LEN as usize];
+            let err_len = unsafe { onig_error_code_to_str(s.as_mut_ptr(), r as _) } as usize;
+            let message = match std::str::from_utf8(&s[..err_len]) {
+                Ok(err) => err.to_string(),
+                Err(err) => {
+                    return Err(OnigmoError::new(format!(
+                        "Error message is invalid UTF-8: {err}"
+                    )));
+                }
+            };
+            Err(OnigmoError::new(message))
+        }
+    }
+
+    /// Byte-slice analogue of [`Regex::search`]. The regex should have
+    /// been compiled with a matching `OnigmoEncoding` for `heystack`.
+    pub fn search_bytes(
+        &self,
+        heystack: &[u8],
+        from: usize,
+        to: usize,
+        region: Option<&mut Region>,
+    ) -> Result<Option<usize>, OnigmoError> {
+        let beg = heystack.as_ptr();
+        let end = unsafe { beg.add(heystack.len()) };
+        let r = unsafe {
+            let start = beg.add(from);
+            let range = beg.add(to);
+            if start > end {
+                return Err(OnigmoError::new("Start of match should be before end"));
+            }
+            if range > end {
+                return Err(OnigmoError::new("Limit of match should be before end"));
+            }
+            onig_search(
+                self.raw,
+                beg,
+                end,
+                start,
+                range,
+                match region {
+                    Some(region) => (*region).raw(),
+                    None => std::ptr::null_mut(),
+                },
+                self.option,
+            )
+        };
+
+        if r >= 0 {
+            Ok(Some(r as usize))
+        } else if r == ONIG_MISMATCH as isize {
+            Ok(None)
+        } else {
+            Err(OnigmoError::from_code(r))
+        }
     }
 
     /// Search pattern in string.
@@ -648,5 +851,61 @@ mod test {
         // (14, 27)
         // (28, 41)
         // (45, 58)
+    }
+
+    #[test]
+    fn windows_31j_dot_matches_one_char() {
+        // /./ compiled under Windows-31J, matched against
+        // "\xc3\xe9" (Windows-31J bytes): 0xC3 is a single-byte char
+        // (it's outside the 0x81-0x9F / 0xE0-0xFC lead-byte range),
+        // so `/./` should match just the first byte `\xc3`.
+        let re = Regex::new_bytes_with_encoding(
+            b".",
+            OnigmoOption::None,
+            OnigmoEncoding::Windows_31J,
+        )
+        .unwrap();
+        let caps = re.captures_bytes(b"\xc3\xe9").unwrap().unwrap();
+        assert_eq!(caps.at(0), Some(&b"\xc3"[..]));
+    }
+
+    #[test]
+    fn euc_jp_pattern_matches_multibyte() {
+        // A single EUC-JP two-byte char (`あ` = 0xa4 0xa2) should be
+        // matched by `/./` compiled under EUC-JP as one character
+        // (two bytes).
+        let re = Regex::new_bytes_with_encoding(
+            b".",
+            OnigmoOption::None,
+            OnigmoEncoding::EUC_JP,
+        )
+        .unwrap();
+        let caps = re.captures_bytes(b"\xa4\xa2").unwrap().unwrap();
+        assert_eq!(caps.at(0), Some(&b"\xa4\xa2"[..]));
+    }
+
+    #[test]
+    fn iso_8859_1_matches_bytewise() {
+        let re = Regex::new_bytes_with_encoding(
+            b".",
+            OnigmoOption::None,
+            OnigmoEncoding::ISO_8859_1,
+        )
+        .unwrap();
+        // Latin-1 "é" is a single byte 0xE9.
+        let caps = re.captures_bytes(b"\xe9x").unwrap().unwrap();
+        assert_eq!(caps.at(0), Some(&b"\xe9"[..]));
+    }
+
+    #[test]
+    fn encoding_is_preserved() {
+        let re = Regex::new_bytes_with_encoding(
+            b"a",
+            OnigmoOption::None,
+            OnigmoEncoding::Shift_JIS,
+        )
+        .unwrap();
+        assert_eq!(re.encoding(), OnigmoEncoding::Shift_JIS);
+        assert_eq!(re.as_bytes(), b"a");
     }
 }
