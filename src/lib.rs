@@ -106,6 +106,48 @@ impl OnigmoEncoding {
     }
 }
 
+// ---------------------------------------------------------------------
+// Compile-time warning collection.
+//
+// Onigmo reports pattern-level diagnostics ("nested repeat operator
+// '?' and '+' was replaced with '*' in regular expression", ...)
+// through a process-global warning callback which defaults to a
+// no-op. CRuby routes it to `rb_warn`; we capture the messages into a
+// thread-local buffer during `onig_new` and attach them to the
+// resulting `Regex`, so callers (e.g. a Ruby implementation) can
+// forward them to their own warning mechanism.
+//
+// The callback fires on the thread running `onig_new`, so a
+// thread-local buffer needs no locking.
+// ---------------------------------------------------------------------
+
+thread_local! {
+    static COMPILE_WARNINGS: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+unsafe extern "C" fn collect_warning(s: *const std::os::raw::c_char) {
+    if s.is_null() {
+        return;
+    }
+    let msg = unsafe { std::ffi::CStr::from_ptr(s) }
+        .to_string_lossy()
+        .into_owned();
+    COMPILE_WARNINGS.with(|w| w.borrow_mut().push(msg));
+}
+
+fn install_warn_hooks_once() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| unsafe {
+        onig_set_warn_func(Some(collect_warning));
+        onig_set_verb_warn_func(Some(collect_warning));
+    });
+}
+
+fn drain_warnings() -> Vec<String> {
+    COMPILE_WARNINGS.with(|w| std::mem::take(&mut *w.borrow_mut()))
+}
+
 /// A compilled regular expression.
 #[derive(Debug)]
 pub struct Regex {
@@ -116,6 +158,10 @@ pub struct Regex {
     pattern: Vec<u8>,
     option: u32,
     encoding: OnigmoEncoding,
+    /// Diagnostics Onigmo emitted while parsing this pattern (e.g.
+    /// "nested repeat operator ... was replaced with ..."). Empty for
+    /// clean patterns.
+    warnings: Vec<String>,
 }
 
 unsafe impl Send for Regex {}
@@ -167,6 +213,8 @@ impl Regex {
         option: u32,
         encoding: OnigmoEncoding,
     ) -> Result<Self, OnigmoError> {
+        install_warn_hooks_once();
+        drain_warnings(); // discard any stale entries from a failed prior compile
         let mut raw = std::ptr::null_mut();
         let pattern: Vec<u8> = pattern.to_vec();
         let pattern_start: *const u8 = pattern.as_ptr();
@@ -206,7 +254,17 @@ impl Regex {
             pattern,
             option,
             encoding,
+            warnings: drain_warnings(),
         })
+    }
+
+    /// Diagnostics Onigmo emitted while parsing this pattern, e.g.
+    /// `nested repeat operator '?' and '+' was replaced with '*' in
+    /// regular expression`. Empty for clean patterns. CRuby surfaces
+    /// these via `rb_warn`; callers embedding this crate can forward
+    /// them to their own warning mechanism.
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
     }
 
     /// Returns the pattern as a `&str`.
@@ -895,6 +953,58 @@ mod test {
         // Latin-1 "é" is a single byte 0xE9.
         let caps = re.captures_bytes(b"\xe9x").unwrap().unwrap();
         assert_eq!(caps.at(0), Some(&b"\xe9"[..]));
+    }
+
+    #[test]
+    fn nested_quantifier_not_reduced() {
+        // Bug #17341 (ported from CRuby): a+?* must behave as (a+?)*,
+        // not be reduced away. Before the ReduceTypeTable fix the
+        // match against "aa" stopped at "a".
+        let re = Regex::new("a+?*").unwrap();
+        let caps = re.captures("aa").unwrap().unwrap();
+        assert_eq!(caps.at(0), Some("aa"));
+        let caps = re.captures("").unwrap().unwrap();
+        assert_eq!(caps.at(0), Some(""));
+        // a+?+ likewise stays unreduced.
+        let re = Regex::new("a+?+").unwrap();
+        let caps = re.captures("aa").unwrap().unwrap();
+        assert_eq!(caps.at(0), Some("aa"));
+    }
+
+    #[test]
+    fn word_class_matches_join_control() {
+        // CRuby >= 3.4 includes Join_Control (U+200C/U+200D) in the
+        // word ctype per UTS #18; CR_Word carries the same range now.
+        let re = Regex::new("[[:word:]]").unwrap();
+        assert!(re.captures("\u{200C}").unwrap().is_some());
+        assert!(re.captures("\u{200D}").unwrap().is_some());
+        let re = Regex::new(r"\p{Word}").unwrap();
+        assert!(re.captures("\u{200C}").unwrap().is_some());
+        // Ruby's \w is ASCII-only (OP_ASCII_WORD) — it must NOT be
+        // affected by the CR_Word change.
+        let re = Regex::new(r"\w").unwrap();
+        assert!(re.captures("\u{200C}").unwrap().is_none());
+        assert!(re.captures("\u{3042}").unwrap().is_none());
+    }
+
+    #[test]
+    fn compile_warnings_are_collected() {
+        // A{0,1}+ triggers "nested repeat operator '?' and '+' was
+        // replaced with '*' in regular expression".
+        let re = Regex::new("foo(A{0,1}+)Abar").unwrap();
+        assert_eq!(re.warnings().len(), 1, "warnings: {:?}", re.warnings());
+        assert!(
+            re.warnings()[0].contains("nested repeat operator"),
+            "unexpected warning: {:?}",
+            re.warnings()
+        );
+        // The match semantics agree with CRuby.
+        let caps = re.captures("fooAAAbar").unwrap().unwrap();
+        assert_eq!(caps.at(0), Some("fooAAAbar"));
+        assert_eq!(caps.at(1), Some("AA"));
+        // A clean pattern collects nothing (and drains stale state).
+        let re = Regex::new("abc").unwrap();
+        assert!(re.warnings().is_empty());
     }
 
     #[test]
