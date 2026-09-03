@@ -25,7 +25,10 @@ impl Drop for Region {
 }
 
 impl Region {
-    pub(crate) fn new() -> Self {
+    /// A fresh, empty region. Public so a caller can keep one across
+    /// many [`Regex::match_at_with_region`] / [`Regex::search_with_region`]
+    /// calls instead of paying an allocation per match.
+    pub fn new() -> Self {
         let region = unsafe { onig_region_new() };
         Self(region)
     }
