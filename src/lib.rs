@@ -381,6 +381,88 @@ impl Regex {
         }
     }
 
+    /// Anchored match: try the pattern exactly at `heystack[at..]` (Onigmo's
+    /// `onig_match`, no forward search) and record the registers into the
+    /// caller-owned `region`, which is reused across calls — no allocation
+    /// per match once it has grown to the pattern's group count. Returns the
+    /// byte offset (into `heystack`) of the match end.
+    ///
+    /// `\A` and `^` anchor at the start of `heystack`, so a caller that
+    /// wants CRuby `StringScanner` semantics (anchors at the scan position)
+    /// passes the suffix as `heystack` with `at == 0`. `heystack` must be
+    /// valid under the regex's compile-time encoding, and `at` a character
+    /// boundary.
+    pub fn match_at_with_region(
+        &self,
+        heystack: &[u8],
+        at: usize,
+        region: &mut Region,
+    ) -> Result<Option<usize>, OnigmoError> {
+        let hey_start = heystack.as_ptr();
+        let hey_end = unsafe { hey_start.add(heystack.len()) };
+        let at_ptr = unsafe { hey_start.add(at) };
+        let r = unsafe {
+            onig_match(
+                self.raw,
+                hey_start,
+                hey_end,
+                at_ptr,
+                region.raw(),
+                self.option,
+            )
+        };
+        Self::onig_result(r).map(|r| r.map(|len| at + len))
+    }
+
+    /// Forward search from `heystack[from..]` recording the registers into
+    /// the caller-owned, reusable `region` (see [`Regex::match_at_with_region`]).
+    /// Returns the byte offset of the match start.
+    pub fn search_with_region(
+        &self,
+        heystack: &[u8],
+        from: usize,
+        region: &mut Region,
+    ) -> Result<Option<usize>, OnigmoError> {
+        let hey_start = heystack.as_ptr();
+        let hey_end = unsafe { hey_start.add(heystack.len()) };
+        let range_start = unsafe { hey_start.add(from) };
+        let r = unsafe {
+            onig_search(
+                self.raw,
+                hey_start,
+                hey_end,
+                range_start,
+                hey_end,
+                region.raw(),
+                self.option,
+            )
+        };
+        Self::onig_result(r)
+    }
+
+    /// Map an `onig_match` / `onig_search` return code to
+    /// `Ok(Some(position))`, `Ok(None)` on `ONIG_MISMATCH`, or the
+    /// engine's error message.
+    fn onig_result(r: OnigPosition) -> Result<Option<usize>, OnigmoError> {
+        if r >= 0 {
+            Ok(Some(r as usize))
+        } else if r == ONIG_MISMATCH as _ {
+            Ok(None)
+        } else {
+            let mut s = [0; ONIG_MAX_ERROR_MESSAGE_LEN as usize];
+            let err_len = unsafe { onig_error_code_to_str(s.as_mut_ptr(), r as _) } as usize;
+            let message = match std::str::from_utf8(&s[..err_len]) {
+                Ok(err) => err.to_string(),
+                Err(err) => {
+                    return Err(OnigmoError::new(format!(
+                        "Error message is invalid UTF-8: {err}"
+                    )));
+                }
+            };
+            Err(OnigmoError::new(message))
+        }
+    }
+
     /// Returns an iterator over all the non-overlapping capture groups matched
     /// in `text`. This is operationally the same as `find_iter` (except it
     /// yields information about submatches).

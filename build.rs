@@ -152,6 +152,32 @@ fn compile() {
         "enc/windows_1254.c",
         "enc/windows_1257.c",
     ];
+    // Headers pulled in by the sources above. They are not tracked by
+    // bindgen's CargoCallbacks (which only sees what `wrapper.h`
+    // includes), so list them here as well.
+    let headers = [
+        "onigmo.h",
+        "onigmognu.h",
+        "onigmoposix.h",
+        "regenc.h",
+        "regint.h",
+        "regparse.h",
+        "st.h",
+        "enc/iso_8859.h",
+        "enc/shift_jis.h",
+        "enc/jis/props.h",
+        "enc/unicode/casefold.h",
+        "enc/unicode/name2ctype.h",
+    ];
+
+    // Emitting any `rerun-if-changed` turns off cargo's default of
+    // rebuilding when anything in the package changes, so every Onigmo
+    // source we compile has to be listed explicitly. Otherwise bumping
+    // the submodule leaves a stale libonigmo.a linked in.
+    for file in files.iter().chain(headers.iter()) {
+        println!("cargo:rerun-if-changed={}", src.join(file).display());
+    }
+
     for file in files.iter() {
         cc.file(src.join(file));
     }
