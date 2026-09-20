@@ -344,41 +344,35 @@ impl Regex {
         heystack: &'h str,
         pos: usize,
     ) -> Result<Option<Captures<'h>>, OnigmoError> {
-        let hey_start = heystack.as_ptr();
-        let hey_end = unsafe { hey_start.add(heystack.len()) };
-        let range_start = unsafe { hey_start.add(pos) };
-        let range_end = hey_end;
+        self.captures_from_pos_gpos(heystack, pos, pos)
+    }
+
+    /// [`captures_from_pos`](Regex::captures_from_pos) with `\G` pinned to
+    /// `gpos` instead of to the search start (see
+    /// [`search_with_region_gpos`](Regex::search_with_region_gpos)).
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use onigmo_regex::*;
+    ///
+    /// let re = Regex::new(r"\Gbc").unwrap();
+    /// // From 1, `\G` is the search start, so the match is found there.
+    /// assert!(re.captures_from_pos("abcbc", 1).unwrap().is_some());
+    /// // Pinned to 3, only the second `bc` can match.
+    /// let c = re.captures_from_pos_gpos("abcbc", 3, 1).unwrap().unwrap();
+    /// assert_eq!(c.get(0).unwrap().start(), 3);
+    /// ```
+    pub fn captures_from_pos_gpos<'h>(
+        &self,
+        heystack: &'h str,
+        gpos: usize,
+        pos: usize,
+    ) -> Result<Option<Captures<'h>>, OnigmoError> {
         let region = Region::new();
-
-        let r = unsafe {
-            onig_search(
-                self.raw,
-                hey_start,
-                hey_end,
-                range_start,
-                range_end,
-                region.raw(),
-                self.option,
-            )
-        };
-
-        if r >= 0 {
-            Ok(Some(Captures::new(heystack, region, r as usize)))
-        } else if r == ONIG_MISMATCH as _ {
-            Ok(None)
-        } else {
-            let mut s = [0; ONIG_MAX_ERROR_MESSAGE_LEN as usize];
-            let err_len = unsafe { onig_error_code_to_str(s.as_mut_ptr(), r as _) } as usize;
-            let message = match std::str::from_utf8(&s[..err_len]) {
-                Ok(err) => err.to_string(),
-                Err(err) => {
-                    return Err(OnigmoError::new(format!(
-                        "Error message is invalid UTF-8: {err}"
-                    )));
-                }
-            };
-            Err(OnigmoError::new(message))
-        }
+        let r =
+            self.search_gpos_raw(heystack.as_bytes(), gpos, pos, heystack.len(), region.raw())?;
+        Ok(r.map(|start| Captures::new(heystack, region, start)))
     }
 
     /// Anchored match: try the pattern exactly at `heystack[at..]` (Onigmo's
@@ -423,17 +417,76 @@ impl Regex {
         from: usize,
         region: &mut Region,
     ) -> Result<Option<usize>, OnigmoError> {
-        let hey_start = heystack.as_ptr();
-        let hey_end = unsafe { hey_start.add(heystack.len()) };
-        let range_start = unsafe { hey_start.add(from) };
+        self.search_with_region_gpos(heystack, from, from, region)
+    }
+
+    /// [`search_with_region`](Regex::search_with_region) with `\G` pinned to
+    /// `gpos` instead of to the search start (Onigmo's `onig_search_gpos`;
+    /// `onig_search` is this with `gpos == from`).
+    ///
+    /// A caller that scans forward over many start positions while `\G`
+    /// must keep meaning one fixed offset — Ruby's `String#rindex`, whose
+    /// `\G` anchors at the search start it was given, not at each probe —
+    /// needs this: the probe moves, `gpos` does not.
+    ///
+    /// The search still runs forward to the end of `heystack`, so the match
+    /// may end past `gpos`; only where `\G` itself sits is fixed.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use onigmo_regex::*;
+    ///
+    /// let re = Regex::new(r"\Gabc").unwrap();
+    /// let mut region = Region::new();
+    /// // Probing from 0 with `\G` pinned to 3: only the second "abc" matches.
+    /// let r = re.search_with_region_gpos(b"abcabc", 3, 0, &mut region).unwrap();
+    /// assert_eq!(r, Some(3));
+    /// ```
+    pub fn search_with_region_gpos(
+        &self,
+        heystack: &[u8],
+        gpos: usize,
+        from: usize,
+        region: &mut Region,
+    ) -> Result<Option<usize>, OnigmoError> {
+        self.search_gpos_raw(heystack, gpos, from, heystack.len(), region.raw())
+    }
+
+    /// `onig_search_gpos` over `heystack`, searching for a match that starts
+    /// in `from..to` (backward when `to < from`) with `\G` at `gpos`.
+    ///
+    /// The one place this crate calls the engine's search: every public
+    /// search entry point is a thin wrapper over it.
+    fn search_gpos_raw(
+        &self,
+        heystack: &[u8],
+        gpos: usize,
+        from: usize,
+        to: usize,
+        region: *mut OnigRegion,
+    ) -> Result<Option<usize>, OnigmoError> {
+        let len = heystack.len();
+        // Onigmo answers `ONIG_MISMATCH` for a start outside the string
+        // (`start > end || start < str`), which is what the entry points
+        // without their own check have always returned; forming the
+        // pointer first would be out-of-bounds arithmetic, so the check
+        // comes first and the answer is the same.
+        if from > len || to > len || gpos > len {
+            return Ok(None);
+        }
+        let beg = heystack.as_ptr();
+        // SAFETY: `from`, `to` and `gpos` are all within `heystack`, whose
+        // bytes live for the call; `region` is null or a live `OnigRegion`.
         let r = unsafe {
-            onig_search(
+            onig_search_gpos(
                 self.raw,
-                hey_start,
-                hey_end,
-                range_start,
-                hey_end,
-                region.raw(),
+                beg,
+                beg.add(len),
+                beg.add(gpos),
+                beg.add(from),
+                beg.add(to),
+                region,
                 self.option,
             )
         };
@@ -449,17 +502,7 @@ impl Regex {
         } else if r == ONIG_MISMATCH as _ {
             Ok(None)
         } else {
-            let mut s = [0; ONIG_MAX_ERROR_MESSAGE_LEN as usize];
-            let err_len = unsafe { onig_error_code_to_str(s.as_mut_ptr(), r as _) } as usize;
-            let message = match std::str::from_utf8(&s[..err_len]) {
-                Ok(err) => err.to_string(),
-                Err(err) => {
-                    return Err(OnigmoError::new(format!(
-                        "Error message is invalid UTF-8: {err}"
-                    )));
-                }
-            };
-            Err(OnigmoError::new(message))
+            Err(OnigmoError::from_code(r))
         }
     }
 
@@ -511,41 +554,9 @@ impl Regex {
         heystack: &'h [u8],
         pos: usize,
     ) -> Result<Option<CapturesBytes<'h>>, OnigmoError> {
-        let hey_start = heystack.as_ptr();
-        let hey_end = unsafe { hey_start.add(heystack.len()) };
-        let range_start = unsafe { hey_start.add(pos) };
-        let range_end = hey_end;
         let region = Region::new();
-
-        let r = unsafe {
-            onig_search(
-                self.raw,
-                hey_start,
-                hey_end,
-                range_start,
-                range_end,
-                region.raw(),
-                self.option,
-            )
-        };
-
-        if r >= 0 {
-            Ok(Some(CapturesBytes::new(heystack, region, r as usize)))
-        } else if r == ONIG_MISMATCH as _ {
-            Ok(None)
-        } else {
-            let mut s = [0; ONIG_MAX_ERROR_MESSAGE_LEN as usize];
-            let err_len = unsafe { onig_error_code_to_str(s.as_mut_ptr(), r as _) } as usize;
-            let message = match std::str::from_utf8(&s[..err_len]) {
-                Ok(err) => err.to_string(),
-                Err(err) => {
-                    return Err(OnigmoError::new(format!(
-                        "Error message is invalid UTF-8: {err}"
-                    )));
-                }
-            };
-            Err(OnigmoError::new(message))
-        }
+        let r = self.search_gpos_raw(heystack, pos, pos, heystack.len(), region.raw())?;
+        Ok(r.map(|start| CapturesBytes::new(heystack, region, start)))
     }
 
     /// Byte-slice analogue of [`Regex::search`]. The regex should have
@@ -557,38 +568,35 @@ impl Regex {
         to: usize,
         region: Option<&mut Region>,
     ) -> Result<Option<usize>, OnigmoError> {
-        let beg = heystack.as_ptr();
-        let end = unsafe { beg.add(heystack.len()) };
-        let r = unsafe {
-            let start = beg.add(from);
-            let range = beg.add(to);
-            if start > end {
-                return Err(OnigmoError::new("Start of match should be before end"));
-            }
-            if range > end {
-                return Err(OnigmoError::new("Limit of match should be before end"));
-            }
-            onig_search(
-                self.raw,
-                beg,
-                end,
-                start,
-                range,
-                match region {
-                    Some(region) => (*region).raw(),
-                    None => std::ptr::null_mut(),
-                },
-                self.option,
-            )
-        };
+        self.search_bytes_gpos(heystack, from, from, to, region)
+    }
 
-        if r >= 0 {
-            Ok(Some(r as usize))
-        } else if r == ONIG_MISMATCH as isize {
-            Ok(None)
-        } else {
-            Err(OnigmoError::from_code(r))
+    /// [`search_bytes`](Regex::search_bytes) with `\G` pinned to `gpos`
+    /// instead of to the search start (see
+    /// [`search_with_region_gpos`](Regex::search_with_region_gpos)).
+    pub fn search_bytes_gpos(
+        &self,
+        heystack: &[u8],
+        gpos: usize,
+        from: usize,
+        to: usize,
+        region: Option<&mut Region>,
+    ) -> Result<Option<usize>, OnigmoError> {
+        let len = heystack.len();
+        if from > len {
+            return Err(OnigmoError::new("Start of match should be before end"));
         }
+        if to > len {
+            return Err(OnigmoError::new("Limit of match should be before end"));
+        }
+        if gpos > len {
+            return Err(OnigmoError::new("\\G position should be before end"));
+        }
+        let region = match region {
+            Some(region) => region.raw(),
+            None => std::ptr::null_mut(),
+        };
+        self.search_gpos_raw(heystack, gpos, from, to, region)
     }
 
     /// Search pattern in string.
@@ -628,38 +636,7 @@ impl Regex {
         to: usize,
         region: Option<&mut Region>,
     ) -> Result<Option<usize>, OnigmoError> {
-        let beg = heystack.as_ptr();
-        let end = unsafe { beg.add(heystack.len()) };
-        let r = unsafe {
-            let start = beg.add(from);
-            let range = beg.add(to);
-            if start > end {
-                return Err(OnigmoError::new("Start of match should be before end"));
-            }
-            if range > end {
-                return Err(OnigmoError::new("Limit of match should be before end"));
-            }
-            onig_search(
-                self.raw,
-                beg,
-                end,
-                start,
-                range,
-                match region {
-                    Some(region) => (*region).raw(),
-                    None => std::ptr::null_mut(),
-                },
-                self.option,
-            )
-        };
-
-        if r >= 0 {
-            Ok(Some(r as usize))
-        } else if r == ONIG_MISMATCH as isize {
-            Ok(None)
-        } else {
-            Err(OnigmoError::from_code(r))
-        }
+        self.search_bytes(heystack.as_bytes(), from, to, region)
     }
 
     /// Find pattern in string.
@@ -1099,5 +1076,100 @@ mod test {
         .unwrap();
         assert_eq!(re.encoding(), OnigmoEncoding::Shift_JIS);
         assert_eq!(re.as_bytes(), b"a");
+    }
+
+    /// `\G` follows `gpos`, not the probe the search starts from, and a
+    /// forward search may still run past it. This is what Ruby's
+    /// `String#rindex` needs: it walks candidate starts left to right
+    /// while `\G` stays at the offset the caller gave.
+    #[test]
+    fn search_gpos_pins_begin_position() {
+        let re = Regex::new(r"\Gabc").unwrap();
+        let mut region = Region::new();
+        // `onig_search` binds `\G` to the start of each probe...
+        assert_eq!(
+            re.search_with_region(b"abcabc", 0, &mut region).unwrap(),
+            Some(0)
+        );
+        // ...where `gpos` holds it still, wherever the probe begins.
+        for from in 0..=3 {
+            assert_eq!(
+                re.search_with_region_gpos(b"abcabc", 3, from, &mut region)
+                    .unwrap(),
+                Some(3),
+                "from {from}"
+            );
+        }
+        // Nothing matches at a `gpos` the pattern cannot reach.
+        assert_eq!(
+            re.search_with_region_gpos(b"abcabc", 6, 0, &mut region)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            re.search_with_region_gpos(b"abcabc", 1, 0, &mut region)
+                .unwrap(),
+            None
+        );
+
+        // A match may start before `gpos` and end after it.
+        let re = Regex::new(r"YOU.+\G.+").unwrap();
+        assert_eq!(
+            re.search_with_region_gpos(b"helloYOUall.", 9, 0, &mut region)
+                .unwrap(),
+            Some(5)
+        );
+        assert_eq!(region.pos(0), Some((5, 12)));
+
+        // ...including one that ends exactly at `gpos`.
+        let re = Regex::new(r"YOU\G").unwrap();
+        assert_eq!(
+            re.search_with_region_gpos(b"helloYOU.", 8, 0, &mut region)
+                .unwrap(),
+            Some(5)
+        );
+    }
+
+    /// The `gpos` entry points are the general case of the ones that do
+    /// not take it: `onig_search` is `onig_search_gpos` with the search
+    /// start as `gpos`.
+    #[test]
+    fn search_without_gpos_pins_it_to_the_start() {
+        let re = Regex::new(r"\Gabc").unwrap();
+        let mut region = Region::new();
+        for from in 0..=3 {
+            let plain = re.search_with_region(b"abcabc", from, &mut region).unwrap();
+            let gpos = re
+                .search_with_region_gpos(b"abcabc", from, from, &mut region)
+                .unwrap();
+            assert_eq!(plain, gpos, "from {from}");
+        }
+        let caps = re.captures_from_pos("abcabc", 3).unwrap().unwrap();
+        let gpos = re.captures_from_pos_gpos("abcabc", 3, 3).unwrap().unwrap();
+        assert_eq!(caps.get(0).unwrap().start(), gpos.get(0).unwrap().start());
+    }
+
+    /// A position past the end is answered rather than read out of
+    /// bounds: a mismatch where the engine itself would report one, an
+    /// error where the entry point has always raised one.
+    #[test]
+    fn search_gpos_handles_out_of_range_positions() {
+        let re = Regex::new("a").unwrap();
+        let mut region = Region::new();
+        assert_eq!(
+            re.search_with_region_gpos(b"abc", 4, 0, &mut region)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            re.search_with_region_gpos(b"abc", 0, 4, &mut region)
+                .unwrap(),
+            None
+        );
+        assert_eq!(re.search_with_region(b"abc", 4, &mut region).unwrap(), None);
+        assert!(re.captures_from_pos("abc", 4).unwrap().is_none());
+        assert!(re.search_bytes_gpos(b"abc", 0, 4, 3, None).is_err());
+        assert!(re.search_bytes_gpos(b"abc", 0, 0, 4, None).is_err());
+        assert!(re.search_bytes_gpos(b"abc", 4, 0, 3, None).is_err());
     }
 }
