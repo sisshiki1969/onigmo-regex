@@ -7,10 +7,12 @@ include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 mod captures;
 mod error;
 mod region;
+mod timeout;
 
 pub use captures::{Captures, CapturesBytes, FindCaptures, FindMatches, Match, SubCaptures};
 pub use error::OnigmoError;
 pub use region::Region;
+pub use timeout::{deadline, set_deadline, set_timeout, DeadlineGuard};
 
 pub mod OnigmoOption {
     pub const None: u32 = crate::ONIG_OPTION_NONE;
