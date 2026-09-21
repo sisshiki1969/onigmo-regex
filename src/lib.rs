@@ -295,6 +295,23 @@ impl Regex {
         self.encoding
     }
 
+    /// Whether a match of this regex is bounded by the engine's match cache,
+    /// and so runs in time linear in the subject length however the subject
+    /// is chosen.
+    ///
+    /// The cache memoizes "this cache point was already tried at this
+    /// position", which is what collapses the exponential retries of a
+    /// pattern like `/^(a*)*$/`. Some constructs cannot be memoized across
+    /// and turn it off for the whole pattern: back-references, subexpression
+    /// calls (`\g<...>`), the absent operator, a capture group inside a
+    /// look-around, and nested repeats.
+    ///
+    /// This asks the engine, walking the compiled program — it is not a
+    /// syntactic guess about the source.
+    pub fn is_linear_time(&self) -> bool {
+        unsafe { onig_check_linear_time(self.raw) != 0 }
+    }
+
     /// Returns the capture groups for the first match in `heystack`.
     ///
     /// If no match is found, then `Ok(None)` is returned.
@@ -1173,5 +1190,98 @@ mod test {
         assert!(re.search_bytes_gpos(b"abc", 0, 4, 3, None).is_err());
         assert!(re.search_bytes_gpos(b"abc", 0, 0, 4, None).is_err());
         assert!(re.search_bytes_gpos(b"abc", 4, 0, 3, None).is_err());
+    }
+
+    /// `is_linear_time` reads the compiled program, so it answers for the
+    /// constructs the cache cannot memoize across rather than for how the
+    /// source happens to be spelled.
+    #[test]
+    fn is_linear_time_reports_what_the_cache_can_bound() {
+        for pattern in [
+            r"abc",
+            r"^(a*)*$",
+            r"^(a|a)*$",
+            // Look-around and atomic groups are memoized, nested or not.
+            r"a*(?:(?=a*)a)*b",
+            r"a*(?:(?<=a)a*)*b",
+            r"(?>a*)*b",
+            // A capture inside a *positive look-behind* does not turn it
+            // off: only the look-arounds that compile to a push are
+            // walked as nested, and this one does not. CRuby answers the
+            // same for the same reason.
+            r".(?<=(a))",
+        ] {
+            assert!(
+                Regex::new(pattern).unwrap().is_linear_time(),
+                "{pattern} should be bounded by the match cache"
+            );
+        }
+        for pattern in [
+            // A back-reference: the cache cannot key on it.
+            r"(a)\1",
+            r"(a+)+\1b",
+            r"(?<x>a)\k<x>",
+            // A subexpression call.
+            r"(?<a>a){0}\g<a>",
+            // A capture inside a look-around.
+            r".(?=(a))",
+            // The absent operator.
+            r"(?~abc)",
+        ] {
+            assert!(
+                !Regex::new(pattern).unwrap().is_linear_time(),
+                "{pattern} should defeat the match cache"
+            );
+        }
+    }
+
+    /// The point of the cache: a pattern that used to backtrack
+    /// exponentially now finishes. Without it, 40 `a` takes longer than
+    /// any test timeout — the search is one `onig_search` call, so there
+    /// is nothing to interrupt it either.
+    #[test]
+    fn catastrophic_backtracking_is_bounded_by_the_cache() {
+        let re = Regex::new(r"^(a*)*$").unwrap();
+        for n in [20usize, 40, 100] {
+            let subject = "a".repeat(n) + "b";
+            assert_eq!(re.search(&subject, 0, subject.len(), None).unwrap(), None);
+        }
+        // And the same pattern still matches what it should.
+        let subject = "a".repeat(100);
+        assert_eq!(re.search(&subject, 0, subject.len(), None).unwrap(), Some(0));
+    }
+
+    /// Turning the cache on must not change an answer. Each of these
+    /// backtracks enough to cross the threshold that enables it, and the
+    /// captures still have to come out as they would without it.
+    #[test]
+    fn the_cache_does_not_change_captures() {
+        let long = "a".repeat(60);
+        let cases: &[(&str, &str, Option<&[&str]>)] = &[
+            // Exhausts every split of the run before failing, then
+            // matches once a `b` is there.
+            (r"^(a*)*$", &long, Some(&[&long, ""])),
+            (r"^(a*)*b$", &format!("{long}b"), Some(&[&format!("{long}b"), ""])),
+            // A look-around inside the loop, which the cache treats with
+            // its extended (two-bit) points.
+            (r"^(?:(?=a*)a)*$", &long, Some(&[&long])),
+            // An atomic group inside the loop.
+            (r"^(?>a*)*$", &long, Some(&[&long])),
+            // No match, with a trailing character that cannot match.
+            (r"^(a|aa)*$", &format!("{long}b"), None),
+        ];
+        for (pattern, subject, expected) in cases {
+            let re = Regex::new(pattern).unwrap();
+            let actual: Option<Vec<String>> = re
+                .captures(subject)
+                .unwrap()
+                .map(|c| c.iter().flat_map(|s| s.map(|s| s.to_string())).collect());
+            assert_eq!(
+                expected.map(|e| e.iter().map(|s| s.to_string()).collect::<Vec<_>>()),
+                actual,
+                "{pattern} against {} chars",
+                subject.len()
+            );
+        }
     }
 }

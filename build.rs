@@ -85,6 +85,7 @@ fn compile() {
             #define HAVE_STDLIB_H 1
             #define HAVE_LIMITS_H 1
             #define HAVE_INTTYPES_H 1
+            #define HAVE_STDINT_H 1
             #define SIZEOF_INT 4
             #define SIZEOF_SHORT 2
             #define SIZEOF_LONG {0}

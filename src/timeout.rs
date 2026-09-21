@@ -97,14 +97,23 @@ mod tests {
     use crate::*;
     use std::time::Duration;
 
-    /// The reason this machinery exists: `/^(a*)*$/` against a long run
-    /// of `a` with no match at the end backtracks exponentially, inside
-    /// one `onig_search` call. Without a deadline the call never
-    /// returns.
+    /// The reason this machinery exists: a pattern that backtracks
+    /// exponentially does so inside one `onig_search` call, and without a
+    /// deadline that call never returns.
+    ///
+    /// The pattern has to be one the match cache cannot memoize across,
+    /// or there is no runaway left to cut short — `/^(a*)*$/`, the usual
+    /// example, now finishes on its own. The back-reference is what keeps
+    /// the cache from applying, which `is_linear_time` states outright.
     #[test]
     fn catastrophic_backtracking_stops_at_the_deadline() {
-        let re = Regex::new(r"^(a*)*$").unwrap();
-        let subject = "a".repeat(40) + "b";
+        let re = Regex::new(r"(a+)+\1b").unwrap();
+        assert!(
+            !re.is_linear_time(),
+            "the pattern must be one the match cache cannot bound, or it \
+             would never run away in the first place"
+        );
+        let subject = "a".repeat(40) + "c";
         let started = std::time::Instant::now();
         let _guard = set_timeout(Some(Duration::from_millis(50)));
         let err = re
