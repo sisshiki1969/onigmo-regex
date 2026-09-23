@@ -60,6 +60,23 @@ pub enum OnigmoEncoding {
     Windows_1253,
     Windows_1254,
     Windows_1257,
+    GBK,
+    CP949,
+    Big5_HKSCS,
+    Big5_UAO,
+    Emacs_Mule,
+}
+
+// Encodings Onigmo compiles but does not declare in `onigmo.h`, so the
+// generated bindings have no symbol for them (Ruby's `encdb` registers
+// them by name instead). They are defined with `OnigEncodingDefine` in
+// `enc/{gbk,cp949,emacs_mule,big5}.c`, which `build.rs` compiles.
+unsafe extern "C" {
+    static OnigEncodingGBK: OnigEncodingType;
+    static OnigEncodingCP949: OnigEncodingType;
+    static OnigEncodingBIG5_HKSCS: OnigEncodingType;
+    static OnigEncodingBIG5_UAO: OnigEncodingType;
+    static OnigEncodingEmacs_Mule: OnigEncodingType;
 }
 
 impl OnigmoEncoding {
@@ -103,6 +120,11 @@ impl OnigmoEncoding {
                 OnigmoEncoding::Windows_1253 => &OnigEncodingWindows_1253 as _,
                 OnigmoEncoding::Windows_1254 => &OnigEncodingWindows_1254 as _,
                 OnigmoEncoding::Windows_1257 => &OnigEncodingWindows_1257 as _,
+                OnigmoEncoding::GBK          => &OnigEncodingGBK as _,
+                OnigmoEncoding::CP949        => &OnigEncodingCP949 as _,
+                OnigmoEncoding::Big5_HKSCS   => &OnigEncodingBIG5_HKSCS as _,
+                OnigmoEncoding::Big5_UAO     => &OnigEncodingBIG5_UAO as _,
+                OnigmoEncoding::Emacs_Mule   => &OnigEncodingEmacs_Mule as _,
             }
         }
     }
@@ -1003,6 +1025,29 @@ mod test {
         .unwrap();
         let caps = re.captures_bytes(b"\xc3\xe9").unwrap().unwrap();
         assert_eq!(caps.at(0), Some(&b"\xc3"[..]));
+    }
+
+    #[test]
+    fn cjk_code_pages_compiled_but_undeclared_by_onigmo_h() {
+        // GBK, CP949, Big5-HKSCS, Big5-UAO and Emacs-Mule are defined in
+        // Onigmo's `enc/` but not declared in `onigmo.h`, so they reach
+        // the enum through the crate's own `extern` block. `/./` under
+        // each takes one whole double-byte character.
+        for (enc, bytes) in [
+            (OnigmoEncoding::GBK, &b"\xd6\xd0\xce\xc4"[..]),
+            (OnigmoEncoding::CP949, &b"\x8c\x63abc"[..]),
+            (OnigmoEncoding::Big5_HKSCS, &b"\xa4\xa4\xa4\xe5"[..]),
+            (OnigmoEncoding::Big5_UAO, &b"\xa4\xa4\xa4\xe5"[..]),
+        ] {
+            let re = Regex::new_bytes_with_encoding(b".", OnigmoOption::None, enc).unwrap();
+            let caps = re.captures_bytes(bytes).unwrap().unwrap();
+            assert_eq!(caps.at(0), Some(&bytes[..2]), "{enc:?}");
+        }
+        // Emacs-Mule: `0x92` leads a three-byte JIS X 0208 character.
+        let re = Regex::new_bytes_with_encoding(b".", OnigmoOption::None, OnigmoEncoding::Emacs_Mule)
+            .unwrap();
+        let caps = re.captures_bytes(b"\x92\xa4\xa2a").unwrap().unwrap();
+        assert_eq!(caps.at(0), Some(&b"\x92\xa4\xa2"[..]));
     }
 
     #[test]

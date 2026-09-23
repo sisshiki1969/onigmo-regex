@@ -152,6 +152,9 @@ fn compile() {
         "enc/windows_1253.c",
         "enc/windows_1254.c",
         "enc/windows_1257.c",
+        "enc/gbk.c",
+        "enc/cp949.c",
+        "enc/emacs_mule.c",
     ];
     // Headers pulled in by the sources above. They are not tracked by
     // bindgen's CargoCallbacks (which only sees what `wrapper.h`
