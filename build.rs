@@ -51,6 +51,11 @@ fn compile() {
     //bindgen_headers("oniguruma/src/oniguruma.h");
 
     let mut cc = cc::Build::new();
+    // Onigmo's st.h declares its callbacks with an empty parameter list
+    // (`int (*compare)();`), which GCC 15's C23 default reads as `(void)`
+    // and then rejects every call with "too many arguments". Compile as
+    // GNU C11, the dialect the sources were written for.
+    cc.flag("-std=gnu11");
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
     let ref src = Path::new("onigmo");
     let config_h = out_dir.join("config.h");
