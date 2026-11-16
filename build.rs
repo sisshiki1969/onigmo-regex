@@ -191,6 +191,13 @@ fn compile() {
         cc.file(src.join(file));
     }
 
+    // Encodings CRuby has and upstream Onigmo does not, kept in the
+    // crate's own `enc/` (the submodule stays upstream's tree).
+    for file in ["enc/cesu_8.c"] {
+        println!("cargo:rerun-if-changed={file}");
+        cc.file(file);
+    }
+
     cc.warnings(false); // not actionable by the end user
     cc.compile("onigmo");
 }
