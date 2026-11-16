@@ -65,6 +65,7 @@ pub enum OnigmoEncoding {
     Big5_HKSCS,
     Big5_UAO,
     Emacs_Mule,
+    CESU_8,
 }
 
 // Encodings Onigmo compiles but does not declare in `onigmo.h`, so the
@@ -77,6 +78,9 @@ unsafe extern "C" {
     static OnigEncodingBIG5_HKSCS: OnigEncodingType;
     static OnigEncodingBIG5_UAO: OnigEncodingType;
     static OnigEncodingEmacs_Mule: OnigEncodingType;
+    // CRuby's `enc/cesu_8.c`, which upstream Onigmo does not have at
+    // all; `build.rs` compiles the crate's own copy (`enc/cesu_8.c`).
+    static OnigEncodingCESU_8: OnigEncodingType;
 }
 
 impl OnigmoEncoding {
@@ -125,6 +129,7 @@ impl OnigmoEncoding {
                 OnigmoEncoding::Big5_HKSCS   => &OnigEncodingBIG5_HKSCS as _,
                 OnigmoEncoding::Big5_UAO     => &OnigEncodingBIG5_UAO as _,
                 OnigmoEncoding::Emacs_Mule   => &OnigEncodingEmacs_Mule as _,
+                OnigmoEncoding::CESU_8       => &OnigEncodingCESU_8 as _,
             }
         }
     }
@@ -1048,6 +1053,33 @@ mod test {
             .unwrap();
         let caps = re.captures_bytes(b"\x92\xa4\xa2a").unwrap().unwrap();
         assert_eq!(caps.at(0), Some(&b"\x92\xa4\xa2"[..]));
+    }
+
+    #[test]
+    fn cesu_8_surrogate_pair_is_one_character() {
+        // CESU-8 spells U+1F600 as its two UTF-16 surrogates, each in
+        // UTF-8's three-byte form. The pair is one character: `/./`
+        // takes all six bytes, and a Unicode property sees the scalar.
+        let pair = b"\xed\xa0\xbd\xed\xb8\x80";
+        let subject = b"a\xc3\xa9\xed\xa0\xbd\xed\xb8\x80b";
+        let enc = OnigmoEncoding::CESU_8;
+        let re = Regex::new_bytes_with_encoding(b"\\A..(.)(.)", OnigmoOption::None, enc).unwrap();
+        let caps = re.captures_bytes(subject).unwrap().unwrap();
+        assert_eq!(caps.at(1), Some(&pair[..]));
+        assert_eq!(caps.at(2), Some(&b"b"[..]));
+        let re = Regex::new_bytes_with_encoding(b"\\p{Emoji}", OnigmoOption::None, enc).unwrap();
+        let caps = re.captures_bytes(subject).unwrap().unwrap();
+        assert_eq!(caps.at(0), Some(&pair[..]));
+        // The pattern's own bytes are CESU-8 too, and the BMP folds as
+        // in UTF-8.
+        let re = Regex::new_bytes_with_encoding(
+            b"\xc3\x89[\xed\xa0\xbd\xed\xb8\x80]+",
+            OnigmoOption::IgnoreCase,
+            enc,
+        )
+        .unwrap();
+        let caps = re.captures_bytes(subject).unwrap().unwrap();
+        assert_eq!(caps.at(0), Some(&subject[1..9]));
     }
 
     #[test]
